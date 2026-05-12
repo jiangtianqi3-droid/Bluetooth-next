@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">听迹</string>
+    <string name="monitor_channel_name">蓝牙使用监控</string>
+    <string name="monitor_notification_title">正在监控蓝牙耳机</string>
+</resources>
