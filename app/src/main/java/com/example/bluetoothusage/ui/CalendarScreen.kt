@@ -1210,57 +1210,65 @@ fun InteractiveUsageTimeline(
                 )
             }
 
-            val laidOutLabels = if (isAtMinimumZoom) {
-                labelDrawItems
-            } else {
-                labelDrawItems.avoidTimelineLabelOverlap(
-                    viewportHeight = size.height,
-                    gap = 8.dp.toPx(),
-                    topPadding = 12.dp.toPx(),
-                    bottomPadding = 12.dp.toPx()
-                )
-            }
+            val laidOutLabels = layoutTimelineLabelItems(
+                items = labelDrawItems,
+                stackLabels = isAtMinimumZoom,
+                viewportHeight = size.height,
+                gap = 8.dp.toPx(),
+                topPadding = 12.dp.toPx(),
+                bottomPadding = 12.dp.toPx()
+            )
             val orderedLabels = if (isAtMinimumZoom && labelLayerDirection > 0f) {
                 laidOutLabels.asReversed()
             } else {
                 laidOutLabels
             }
-            orderedLabels.forEach { item ->
+            val positionedLabels = orderedLabels.map { item ->
                 val itemLeft = (labelBoxRight - item.labelBoxWidth).coerceAtLeast(labelBoxLeft)
-                val textX = itemLeft + labelPadding
+                PositionedTimelineLabel(
+                    item = item,
+                    itemLeft = itemLeft,
+                    textX = itemLeft + labelPadding
+                )
+            }
+
+            positionedLabels.forEach { placed ->
+                drawLine(
+                    color = placed.item.color.copy(alpha = 0.82f * placed.item.alpha),
+                    start = Offset(stripRight, placed.item.midY),
+                    end = Offset(placed.itemLeft, placed.item.labelCenterY),
+                    strokeWidth = 3.dp.toPx(),
+                    cap = StrokeCap.Round
+                )
+            }
+
+            positionedLabels.forEach { placed ->
+                val item = placed.item
                 drawRoundRect(
                     color = item.style.background.copy(alpha = 0.92f * item.alpha),
-                    topLeft = Offset(itemLeft, item.labelTop),
+                    topLeft = Offset(placed.itemLeft, item.labelTop),
                     size = Size(item.labelBoxWidth, item.labelBoxHeight),
                     cornerRadius = labelCorner
                 )
                 drawRoundRect(
                     color = item.style.border.copy(alpha = 0.72f * item.alpha),
-                    topLeft = Offset(itemLeft, item.labelTop),
+                    topLeft = Offset(placed.itemLeft, item.labelTop),
                     size = Size(item.labelBoxWidth, item.labelBoxHeight),
                     cornerRadius = labelCorner,
                     style = Stroke(width = 1.dp.toPx())
-                )
-
-                drawLine(
-                    color = item.color.copy(alpha = 0.82f * item.alpha),
-                    start = Offset(stripRight, item.midY),
-                    end = Offset(itemLeft, item.labelCenterY),
-                    strokeWidth = 3.dp.toPx(),
-                    cap = StrokeCap.Round
                 )
 
                 titlePaint.textAlign = Paint.Align.LEFT
                 detailPaint.textAlign = Paint.Align.LEFT
                 titlePaint.color = item.style.text.copy(alpha = item.alpha).toArgb()
                 detailPaint.color = item.style.supportingText.copy(alpha = item.alpha).toArgb()
-                drawContext.canvas.nativeCanvas.drawText(item.title, textX, item.labelTop + 16.dp.toPx(), titlePaint)
-                drawContext.canvas.nativeCanvas.drawText(item.detail, textX, item.labelTop + 32.dp.toPx(), detailPaint)
+                drawContext.canvas.nativeCanvas.drawText(item.title, placed.textX, item.labelTop + 16.dp.toPx(), titlePaint)
+                drawContext.canvas.nativeCanvas.drawText(item.detail, placed.textX, item.labelTop + 32.dp.toPx(), detailPaint)
                 
                 if (item.hasAppName) {
                     appNamePaint.color = item.style.appText.copy(alpha = item.alpha).toArgb()
                     appNamePaint.alpha = (item.alpha * 255).toInt()
-                    drawContext.canvas.nativeCanvas.drawText(item.appName, textX, item.labelTop + 46.dp.toPx(), appNamePaint)
+                    drawContext.canvas.nativeCanvas.drawText(item.appName, placed.textX, item.labelTop + 46.dp.toPx(), appNamePaint)
                 }
             }
 
@@ -1438,6 +1446,12 @@ private data class TimelineLabelDrawItem(
     val style: TimelineLabelStyle
 )
 
+private data class PositionedTimelineLabel(
+    val item: TimelineLabelDrawItem,
+    val itemLeft: Float,
+    val textX: Float
+)
+
 private data class TimelineLabelStyle(
     val background: Color,
     val border: Color,
@@ -1445,6 +1459,26 @@ private data class TimelineLabelStyle(
     val supportingText: Color,
     val appText: Color
 )
+
+private fun layoutTimelineLabelItems(
+    items: List<TimelineLabelDrawItem>,
+    stackLabels: Boolean,
+    viewportHeight: Float,
+    gap: Float,
+    topPadding: Float,
+    bottomPadding: Float
+): List<TimelineLabelDrawItem> {
+    return if (stackLabels) {
+        items
+    } else {
+        items.avoidTimelineLabelOverlap(
+            viewportHeight = viewportHeight,
+            gap = gap,
+            topPadding = topPadding,
+            bottomPadding = bottomPadding
+        )
+    }
+}
 
 private fun List<TimelineLabelDrawItem>.avoidTimelineLabelOverlap(
     viewportHeight: Float,
@@ -1462,32 +1496,32 @@ private fun List<TimelineLabelDrawItem>.avoidTimelineLabelOverlap(
         }
     }
 
-    val ease = 0.38f
     val sorted = sortedBy { it.labelCenterY }
-    val placedCenters = FloatArray(sorted.size)
-    sorted.forEachIndexed { index, item ->
-        val half = item.labelBoxHeight / 2f
-        val minCenter = if (index == 0) {
-            topPadding + half
-        } else {
-            val previous = sorted[index - 1]
-            placedCenters[index - 1] + previous.labelBoxHeight / 2f + gap + half
-        }
-        val targetCenter = maxOf(item.labelCenterY, minCenter)
-        placedCenters[index] = item.labelCenterY + (targetCenter - item.labelCenterY) * ease
+    val centers = FloatArray(sorted.size)
+    val halfHeights = sorted.map { it.labelBoxHeight / 2f }
+
+    centers[0] = (topPadding + halfHeights[0]).coerceAtLeast(sorted[0].labelCenterY)
+
+    for (i in 1 until sorted.size) {
+        val prevBottom = centers[i - 1] + halfHeights[i - 1]
+        val minCenter = prevBottom + gap + halfHeights[i]
+        centers[i] = maxOf(minCenter, sorted[i].labelCenterY)
     }
 
-    val last = sorted.last()
     val bottomLimit = viewportHeight - bottomPadding
-    val overflow = placedCenters.last() + last.labelBoxHeight / 2f - bottomLimit
+    val lastIdx = sorted.size - 1
+    val overflow = centers[lastIdx] + halfHeights[lastIdx] - bottomLimit
     if (overflow > 0f) {
-        for (index in placedCenters.indices) {
-            placedCenters[index] -= overflow * ease
+        for (i in 0..lastIdx) {
+            centers[i] = (centers[i] - overflow).coerceAtLeast(
+                if (i == 0) topPadding + halfHeights[0]
+                else centers[i - 1] + halfHeights[i - 1] + gap + halfHeights[i]
+            )
         }
     }
 
     return sorted.mapIndexed { index, item ->
-        item.withLabelCenter(placedCenters[index], viewportHeight)
+        item.withLabelCenter(centers[index], viewportHeight)
     }
 }
 
@@ -1564,36 +1598,74 @@ private fun findTimelineLabelRecord(
     val stripRight = centerX + stripWidth / 2f
     val labelBoxLeft = maxOf(stripRight + 72f * dpPx, canvasWidth * 0.46f)
         .coerceAtMost(canvasWidth - 96f * dpPx)
-    val labelBoxRight = canvasWidth - 6f * dpPx
+    val labelBoxRight = canvasWidth - 2f * dpPx
     val labelBoxHeight = 40f * dpPx
+    val labelAvailableWidth = (labelBoxRight - labelBoxLeft).coerceAtLeast(84f * dpPx)
     val minLabelGap = 50f * dpPx
     var nextRightY = 28f * dpPx
+    val hitLabelStyle = TimelineLabelStyle(
+        background = Color.Transparent,
+        border = Color.Transparent,
+        text = Color.Transparent,
+        supportingText = Color.Transparent,
+        appText = Color.Transparent
+    )
 
     fun transformY(baseY: Float): Float = timelineInsetPx + baseY * zoom + offsetY
 
-    sortedRecords
+    val rawItems = sortedRecords
         .flatMap { it.awakeSegments(day, zone, awakeIntervals) }
-        .forEach { segment ->
-            val y1 = transformY(minuteToAwakeY(segment.startMinute, awakeIntervals, contentHeight) ?: return@forEach)
-            val y2 = transformY(minuteToAwakeY(segment.endMinute, awakeIntervals, contentHeight) ?: return@forEach)
+        .mapNotNull { segment ->
+            val startBaseY = minuteToAwakeY(segment.startMinute, awakeIntervals, contentHeight) ?: return@mapNotNull null
+            val endBaseY = minuteToAwakeY(segment.endMinute, awakeIntervals, contentHeight) ?: return@mapNotNull null
+            val y1 = transformY(startBaseY)
+            val y2 = transformY(endBaseY)
             val midY = (y1 + y2) / 2f
             val baseLabelY = if (stackLabels) maxOf(midY, nextRightY) else midY
             if (stackLabels) {
                 nextRightY = baseLabelY + minLabelGap
             }
             val labelY = baseLabelY + if (stackLabels) labelOffsetY else 0f
-
-            val labelTop = labelY - labelBoxHeight / 2f
-            val labelBottom = labelTop + labelBoxHeight
             val labelAlpha = minOf(rangeAlpha(midY, canvasHeight), rangeAlpha(labelY, canvasHeight))
-            if (
-                labelAlpha > 0.08f &&
-                tapOffset.x in labelBoxLeft..labelBoxRight &&
-                tapOffset.y in labelTop..labelBottom
-            ) {
-                return segment.record
+            if (labelAlpha <= 0.08f) {
+                return@mapNotNull null
             }
+            val hasAppName = zoom > 2.0f && segment.record.audioAppName.isNotBlank()
+            val currentLabelBoxHeight = if (hasAppName) 56f * dpPx else labelBoxHeight
+            TimelineLabelDrawItem(
+                color = Color.Transparent,
+                midY = midY,
+                labelCenterY = labelY,
+                labelTop = labelY - currentLabelBoxHeight / 2f,
+                labelBoxWidth = labelAvailableWidth,
+                labelBoxHeight = currentLabelBoxHeight,
+                alpha = labelAlpha,
+                title = "",
+                detail = "",
+                appName = "",
+                hasAppName = hasAppName,
+                style = hitLabelStyle
+            ) to segment.record
         }
+    val laidOut = layoutTimelineLabelItems(
+        items = rawItems.map { it.first },
+        stackLabels = stackLabels,
+        viewportHeight = canvasHeight,
+        gap = 8f * dpPx,
+        topPadding = 12f * dpPx,
+        bottomPadding = 12f * dpPx
+    )
+    laidOut.zip(rawItems.map { it.second }).forEach { (item, record) ->
+        val labelTop = item.labelTop
+        val labelBottom = labelTop + item.labelBoxHeight
+        if (
+            item.alpha > 0.08f &&
+            tapOffset.x in labelBoxLeft..labelBoxRight &&
+            tapOffset.y in labelTop..labelBottom
+        ) {
+            return record
+        }
+    }
     return null
 }
 
