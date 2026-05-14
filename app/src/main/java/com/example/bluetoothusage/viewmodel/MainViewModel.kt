@@ -19,6 +19,7 @@ import com.example.bluetoothusage.repository.SettingsRepository
 import com.example.bluetoothusage.repository.TargetDevice
 import com.example.bluetoothusage.repository.UsageRepository
 import com.example.bluetoothusage.repository.UsageSettings
+import com.example.bluetoothusage.service.MonitorStartupReceiver
 import java.io.File
 import java.time.DayOfWeek
 import java.time.Instant
@@ -87,7 +88,6 @@ class MainViewModel(
     private val selectedMonth = MutableStateFlow(YearMonth.now())
     private val uiClock = MutableStateFlow(System.currentTimeMillis())
     private var timerJob: Job? = null
-    private var connectionPollJob: Job? = null
     private var sessionStartTimes: List<Long> = emptyList()
     private var lastMonitorConnectedAddresses: Set<String> = emptySet()
 
@@ -178,7 +178,6 @@ class MainViewModel(
         viewModelScope.launch {
             settingsRepository.targetDevices.collect { targets ->
                 refreshConnectionState(targets)
-                restartConnectionPolling(targets)
             }
         }
         viewModelScope.launch {
@@ -247,6 +246,7 @@ class MainViewModel(
         viewModelScope.launch {
             val targets = devices.map { TargetDevice(it.name, it.address) }
             settingsRepository.saveTargetDevices(targets)
+            MonitorStartupReceiver.refreshSchedule(getApplication())
             mutableUiState.update { it.copy(isSelectingDevice = false) }
             refreshConnectionState(targets)
         }
@@ -308,6 +308,7 @@ class MainViewModel(
     fun setBootAutoStart(enabled: Boolean) {
         viewModelScope.launch {
             settingsRepository.saveBootAutoStart(enabled)
+            MonitorStartupReceiver.refreshSchedule(getApplication())
         }
     }
 
@@ -394,32 +395,6 @@ class MainViewModel(
         } else {
             stopTimer()
             refreshConnectionState(uiState.value.targetDevices)
-        }
-    }
-
-    private fun restartConnectionPolling(targets: List<TargetDevice>) {
-        connectionPollJob?.cancel()
-        lastMonitorConnectedAddresses = emptySet()
-        if (targets.isEmpty()) return
-        connectionPollJob = viewModelScope.launch {
-            var connectedAddresses = emptySet<String>()
-            while (true) {
-                val connectedTargets = targets.filter { checker.isDeviceConnected(it.address) }
-                val nowConnected = connectedTargets.map { it.address }.toSet()
-                mutableUiState.update { it.copy(isConnected = nowConnected.isNotEmpty()) }
-                connectedTargets
-                    .filter { target -> connectedAddresses.none { it.equals(target.address, ignoreCase = true) } }
-                    .forEach { startMonitorForConnectedTarget(it) }
-                targets.filter { target ->
-                    connectedAddresses.any { it.equals(target.address, ignoreCase = true) } &&
-                        nowConnected.none { it.equals(target.address, ignoreCase = true) }
-                }.forEach {
-                    notifyMonitorDisconnected(it)
-                }
-                connectedAddresses = nowConnected
-                lastMonitorConnectedAddresses = nowConnected
-                delay(10_000)
-            }
         }
     }
 
@@ -621,6 +596,11 @@ class MainViewModel(
         val days: List<DailyUsage>,
         val records: List<UsageRecord>
     )
+
+    override fun onCleared() {
+        checker.close()
+        super.onCleared()
+    }
 }
 
 private fun targetAddressSet(targets: List<TargetDevice>): Set<String> {

@@ -20,7 +20,7 @@ import kotlinx.coroutines.launch
 class MonitorStartupReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         val appContext = context.applicationContext
-        scheduleNextCheck(appContext)
+        refreshSchedule(appContext)
 
         val pendingResult = goAsync()
         CoroutineScope(SupervisorJob() + Dispatchers.IO).launch {
@@ -35,21 +35,53 @@ class MonitorStartupReceiver : BroadcastReceiver() {
     companion object {
         private const val ACTION_MAINTAIN_MONITOR = "com.example.bluetoothusage.action.MAINTAIN_MONITOR"
         private const val REQUEST_MONITOR_HEARTBEAT = 2201
-        private const val HEARTBEAT_INTERVAL_MILLIS = 15L * 60L * 1_000L
+        private const val HEARTBEAT_INTERVAL_MILLIS = 60L * 60L * 1_000L
+        private const val HEARTBEAT_FLEX_MILLIS = 15L * 60L * 1_000L
 
-        fun scheduleNextCheck(context: Context) {
+        fun refreshSchedule(context: Context) {
+            val appContext = context.applicationContext
+            CoroutineScope(SupervisorJob() + Dispatchers.IO).launch {
+                val repository = SettingsRepository(appContext)
+                val settings = repository.usageSettings.first()
+                val targets = repository.targetDevices.first()
+                if (settings.bootAutoStart && targets.isNotEmpty()) {
+                    scheduleNextCheck(appContext)
+                } else {
+                    cancelScheduledCheck(appContext)
+                }
+            }
+        }
+
+        private fun scheduleNextCheck(context: Context) {
             val alarmManager = context.getSystemService(AlarmManager::class.java)
+            val pendingIntent = heartbeatPendingIntent(context)
+            val triggerAt = SystemClock.elapsedRealtime() + HEARTBEAT_INTERVAL_MILLIS
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.KITKAT) {
+                alarmManager.setWindow(
+                    AlarmManager.ELAPSED_REALTIME_WAKEUP,
+                    triggerAt,
+                    HEARTBEAT_FLEX_MILLIS,
+                    pendingIntent
+                )
+            } else {
+                alarmManager.set(AlarmManager.ELAPSED_REALTIME_WAKEUP, triggerAt, pendingIntent)
+            }
+        }
+
+        private fun cancelScheduledCheck(context: Context) {
+            val alarmManager = context.getSystemService(AlarmManager::class.java)
+            val pendingIntent = heartbeatPendingIntent(context)
+            alarmManager.cancel(pendingIntent)
+            pendingIntent.cancel()
+        }
+
+        private fun heartbeatPendingIntent(context: Context): PendingIntent {
             val intent = Intent(context, MonitorStartupReceiver::class.java).apply {
                 action = ACTION_MAINTAIN_MONITOR
             }
             val flags = PendingIntent.FLAG_UPDATE_CURRENT or
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) PendingIntent.FLAG_IMMUTABLE else 0
-            val pendingIntent = PendingIntent.getBroadcast(context, REQUEST_MONITOR_HEARTBEAT, intent, flags)
-            alarmManager.set(
-                AlarmManager.ELAPSED_REALTIME_WAKEUP,
-                SystemClock.elapsedRealtime() + HEARTBEAT_INTERVAL_MILLIS,
-                pendingIntent
-            )
+            return PendingIntent.getBroadcast(context, REQUEST_MONITOR_HEARTBEAT, intent, flags)
         }
 
         private suspend fun restoreMonitorIfNeeded(context: Context, action: String?) {
@@ -66,7 +98,11 @@ class MonitorStartupReceiver : BroadcastReceiver() {
             val targets = repository.targetDevices.first()
             if (targets.isEmpty()) return
             val checker = BluetoothDeviceChecker(context)
-            val connectedTarget = targets.firstOrNull { checker.isDeviceConnected(it.address) }
+            val connectedTarget = try {
+                targets.firstOrNull { checker.isDeviceConnected(it.address) }
+            } finally {
+                checker.close()
+            }
 
             val serviceIntent = Intent(context, BluetoothMonitorService::class.java).apply {
                 if (connectedTarget != null) {

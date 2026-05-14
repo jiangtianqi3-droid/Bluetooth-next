@@ -59,19 +59,24 @@ class BluetoothMonitorService : Service() {
     private var usageSettingsJob: Job? = null
     private var audioInfoJob: Job? = null
     private var todayUsageJob: Job? = null
-    private var monitorJob: Job? = null
+    private var connectionMonitorJob: Job? = null
+    private var limitCheckJob: Job? = null
     private var isInForeground = false
+    private val batteryRefreshAt = mutableMapOf<String, Long>()
+    private var lastNotificationState: MonitorNotificationState? = null
 
     override fun onCreate() {
         super.onCreate()
         checker = BluetoothDeviceChecker(this)
+        serviceScope.launch(Dispatchers.IO) {
+            checker.warmUpProfileProxies()
+        }
         createNotificationChannel()
         registerBluetoothReceiver()
         observeTargetDevice()
         observeUsageSettings()
         observeCurrentAudioInfo()
         observeTodayUsage()
-        startMonitorLoop()
         loadInitialSnapshot()
     }
 
@@ -86,7 +91,7 @@ class BluetoothMonitorService : Service() {
                         val target = targetForAddress(address) ?: return@launch
                         usageSettings = (application as BluetoothUsageApp).settingsRepository.usageSettings.first()
                         connectedAddresses.add(target.address)
-                        refreshBattery(target.address)
+                        refreshBattery(target.address, force = true)
                         startSession(target.name.ifBlank { name }, target.address)
                     }
                 }
@@ -101,7 +106,7 @@ class BluetoothMonitorService : Service() {
                     ensureTargetDeviceLoaded()
                     applyConnectionRules()
                     if (shouldShowMonitorNotification()) {
-                        updateNotification()
+                        updateNotification(force = true)
                     }
                 }
             }
@@ -131,6 +136,7 @@ class BluetoothMonitorService : Service() {
 
     override fun onDestroy() {
         runCatching { unregisterReceiver(receiver) }
+        checker.close()
         serviceScope.cancel()
         super.onDestroy()
     }
@@ -159,6 +165,7 @@ class BluetoothMonitorService : Service() {
                 connectedAddresses.add(session.deviceAddress)
                 updateNotification()
             }
+            updateMonitoringJobs()
             applyConnectionRules()
         }
     }
@@ -170,7 +177,7 @@ class BluetoothMonitorService : Service() {
                 val target = targetForAddress(device.address)
                 if (target != null) {
                     connectedAddresses.add(target.address)
-                    refreshBattery(target.address)
+                    refreshBattery(target.address, force = true)
                     startSession(target.name.ifBlank { device.safeName() }, target.address)
                 }
             },
@@ -207,9 +214,11 @@ class BluetoothMonitorService : Service() {
                 }
                 if (removedAddresses.isNotEmpty()) {
                     connectedAddresses.removeAll(removedAddresses)
+                    removedAddresses.forEach { batteryRefreshAt.remove(it.uppercase()) }
                     removedAddresses.forEach { app.settingsRepository.saveBatteryPercent(it, null) }
                 }
                 targetDevices = targets
+                updateMonitoringJobs()
                 if (targets.isEmpty()) {
                     connectedAddresses.clear()
                     removeMonitorNotification(stopService = activeSessions.isEmpty())
@@ -228,7 +237,9 @@ class BluetoothMonitorService : Service() {
             app.settingsRepository.usageSettings.collectLatest { settings ->
                 usageSettings = settings
                 applyConnectionRules()
-                checkDailyLimit()
+                if (activeSessions.isNotEmpty()) {
+                    checkDailyLimit()
+                }
                 updateNotification()
             }
         }
@@ -271,14 +282,42 @@ class BluetoothMonitorService : Service() {
         }
     }
 
-    private fun startMonitorLoop() {
-        monitorJob?.cancel()
-        monitorJob = serviceScope.launch {
+    private fun updateMonitoringJobs() {
+        if (targetDevices.isNotEmpty()) {
+            startConnectionMonitorLoop()
+        } else {
+            connectionMonitorJob?.cancel()
+            connectionMonitorJob = null
+        }
+
+        if (activeSessions.isNotEmpty()) {
+            startLimitCheckLoop()
+        } else {
+            limitCheckJob?.cancel()
+            limitCheckJob = null
+        }
+    }
+
+    private fun startConnectionMonitorLoop() {
+        if (connectionMonitorJob?.isActive == true || targetDevices.isEmpty()) return
+        connectionMonitorJob = serviceScope.launch {
             while (true) {
-                delay(MONITOR_INTERVAL_MILLIS)
+                delay(CONNECTION_CHECK_INTERVAL_MILLIS)
                 applyConnectionRules()
-                checkDailyLimit()
             }
+        }
+    }
+
+    private fun startLimitCheckLoop() {
+        if (limitCheckJob?.isActive == true || activeSessions.isEmpty()) return
+        limitCheckJob = serviceScope.launch {
+            while (activeSessions.isNotEmpty()) {
+                delay(LIMIT_CHECK_INTERVAL_MILLIS)
+                if (activeSessions.isNotEmpty()) {
+                    checkDailyLimit()
+                }
+            }
+            limitCheckJob = null
         }
     }
 
@@ -298,6 +337,7 @@ class BluetoothMonitorService : Service() {
 
         connectedAddresses.clear()
         connectedAddresses.addAll(connectedTargetAddresses)
+        updateMonitoringJobs()
         connectedTargets.forEach { target ->
             cancelPendingDisconnect(target.address)
             refreshBattery(target.address)
@@ -317,7 +357,7 @@ class BluetoothMonitorService : Service() {
             if (connectedTargets.isNotEmpty()) {
                 updateNotification("已连接：${connectedDeviceNames()}，睡眠时间暂停记录")
             } else {
-                removeMonitorNotification(stopService = false)
+                removeMonitorNotification(stopService = true)
             }
             return
         }
@@ -331,7 +371,7 @@ class BluetoothMonitorService : Service() {
             val target = connectedTargets.first()
             startSession(target.name, target.address)
         } else if (connectedTargets.isEmpty() && activeSessions.isEmpty()) {
-            removeMonitorNotification(stopService = false)
+            removeMonitorNotification(stopService = true)
         } else {
             updateNotification()
         }
@@ -373,6 +413,7 @@ class BluetoothMonitorService : Service() {
         serviceScope.launch {
             val app = application as BluetoothUsageApp
             app.settingsRepository.setActiveSessions(activeSessions.values.map { it.toInfo() })
+            updateMonitoringJobs()
             checkDailyLimit()
         }
         updateNotification("已连接：${target.name.ifBlank { deviceName }}，正在计时")
@@ -381,6 +422,7 @@ class BluetoothMonitorService : Service() {
     private fun endActiveSession(deviceAddress: String, endTime: Long, text: String) {
         val sessionKey = activeSessionKey(deviceAddress) ?: deviceAddress
         val session = activeSessions.remove(sessionKey)
+        updateMonitoringJobs()
 
         serviceScope.launch(Dispatchers.IO) {
             val app = application as BluetoothUsageApp
@@ -408,7 +450,7 @@ class BluetoothMonitorService : Service() {
         if (connectedAddresses.isNotEmpty()) {
             updateNotification(text)
         } else {
-            removeMonitorNotification(stopService = targetDevices.isEmpty())
+            removeMonitorNotification(stopService = activeSessions.isEmpty())
         }
     }
 
@@ -458,15 +500,26 @@ class BluetoothMonitorService : Service() {
                     text = "已断开：${target.name.ifBlank { deviceName }}"
                 )
                 if (activeSessions.isEmpty() && connectedAddresses.isEmpty()) {
-                    removeMonitorNotification(stopService = targetDevices.isEmpty())
+                    removeMonitorNotification(stopService = true)
                 }
             }
         }
     }
 
-    private fun refreshBattery(address: String) {
+    private fun refreshBattery(address: String, force: Boolean = false) {
+        if (!shouldRefreshBattery(address, force)) return
         val battery = checker.getBatteryLevel(address)
-        if (battery != null) saveBattery(address, battery)
+        batteryRefreshAt[address.uppercase()] = System.currentTimeMillis()
+        saveBattery(address, battery)
+    }
+
+    private fun shouldRefreshBattery(address: String, force: Boolean): Boolean {
+        if (address.isBlank()) return false
+        if (force) return true
+        val normalized = address.uppercase()
+        if (usageSettings.batteryPercents[normalized] != null) return false
+        val lastRefresh = batteryRefreshAt[normalized] ?: return true
+        return System.currentTimeMillis() - lastRefresh >= UNKNOWN_BATTERY_REFRESH_INTERVAL_MILLIS
     }
 
     private fun saveBattery(address: String, level: Int?) {
@@ -527,35 +580,40 @@ class BluetoothMonitorService : Service() {
         manager.notify(LIMIT_NOTIFICATION_ID, notification)
     }
 
-    private fun startAsForeground(text: String? = null) {
+    private fun startAsForeground(payload: MonitorNotificationPayload) {
         val type = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
             ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE
         } else {
             0
         }
         runCatching {
-            ServiceCompat.startForeground(this, NOTIFICATION_ID, buildNotification(text), type)
+            ServiceCompat.startForeground(this, NOTIFICATION_ID, payload.notification, type)
             isInForeground = true
+            lastNotificationState = payload.state
         }.onFailure {
-            getSystemService(NotificationManager::class.java).notify(NOTIFICATION_ID, buildNotification(text))
+            getSystemService(NotificationManager::class.java).notify(NOTIFICATION_ID, payload.notification)
+            lastNotificationState = payload.state
         }
     }
 
-    private fun updateNotification(text: String? = null) {
+    private fun updateNotification(text: String? = null, force: Boolean = false) {
         if (!targetDeviceLoaded && activeSessions.isEmpty() && connectedAddresses.isEmpty()) return
         if (!shouldShowMonitorNotification()) {
             removeMonitorNotification(stopService = targetDevices.isEmpty())
             return
         }
+        val payload = buildNotificationPayload(text)
+        if (!force && isInForeground && lastNotificationState == payload.state) return
         if (!isInForeground) {
-            startAsForeground(text)
+            startAsForeground(payload)
             return
         }
         val manager = getSystemService(NotificationManager::class.java)
-        manager.notify(NOTIFICATION_ID, buildNotification(text))
+        manager.notify(NOTIFICATION_ID, payload.notification)
+        lastNotificationState = payload.state
     }
 
-    private fun buildNotification(overrideText: String? = null): Notification {
+    private fun buildNotificationPayload(overrideText: String? = null): MonitorNotificationPayload {
         val session = activeSessions.values.firstOrNull()
         val battery = notificationBattery()
         val deviceName = when {
@@ -563,6 +621,8 @@ class BluetoothMonitorService : Service() {
             connectedAddresses.size > 1 -> "${connectedAddresses.size} 个耳机"
             else -> session?.deviceName ?: connectedDeviceNames().ifBlank { targetDevices.firstOrNull()?.name ?: "目标设备" }
         }
+        val smallIcon = selectBatteryIcon()
+        val accentColor = notificationAccentColor(battery)
         val title = batteryText(battery)
         val text = "今日使用 ${formatDuration(todayUsageForNotification())}"
         val expandedText = when {
@@ -572,10 +632,17 @@ class BluetoothMonitorService : Service() {
             connectedAddresses.isNotEmpty() -> "$deviceName 已连接\n$text\n播放应用：${audioText()}\n${batteryText(battery)}"
             else -> "$deviceName 未连接\n$text\n${batteryText(battery)}"
         }
+        val state = MonitorNotificationState(
+            smallIcon = smallIcon,
+            accentColor = accentColor,
+            title = title,
+            text = text,
+            expandedText = expandedText
+        )
 
         val builder = NotificationCompat.Builder(this, CHANNEL_ID)
-            .setSmallIcon(selectBatteryIcon())
-            .setColor(notificationAccentColor(battery))
+            .setSmallIcon(smallIcon)
+            .setColor(accentColor)
             .setContentTitle(title)
             .setContentText(text)
             .setSubText("今日")
@@ -586,7 +653,7 @@ class BluetoothMonitorService : Service() {
             .setAutoCancel(false)
             .setOnlyAlertOnce(true)
             .setPriority(NotificationCompat.PRIORITY_LOW)
-        return builder.build()
+        return MonitorNotificationPayload(state, builder.build())
     }
 
     private fun shouldShowMonitorNotification(): Boolean {
@@ -621,6 +688,7 @@ class BluetoothMonitorService : Service() {
             isInForeground = false
         }
         getSystemService(NotificationManager::class.java).cancel(NOTIFICATION_ID)
+        lastNotificationState = null
         if (stopService) stopSelf()
     }
 
@@ -817,11 +885,26 @@ class BluetoothMonitorService : Service() {
         }
     }
 
+    private data class MonitorNotificationState(
+        val smallIcon: Int,
+        val accentColor: Int,
+        val title: String,
+        val text: String,
+        val expandedText: String
+    )
+
+    private data class MonitorNotificationPayload(
+        val state: MonitorNotificationState,
+        val notification: Notification
+    )
+
     companion object {
         private const val CHANNEL_ID = "bluetooth_monitor"
         private const val NOTIFICATION_ID = 1001
         private const val LIMIT_NOTIFICATION_ID = 1002
-        private const val MONITOR_INTERVAL_MILLIS = 30_000L
+        private const val CONNECTION_CHECK_INTERVAL_MILLIS = 90_000L
+        private const val LIMIT_CHECK_INTERVAL_MILLIS = 5L * 60L * 1_000L
+        private const val UNKNOWN_BATTERY_REFRESH_INTERVAL_MILLIS = 10L * 60L * 1_000L
         private const val DISCONNECT_CONFIRM_DELAY_MILLIS = 2_000L
         const val ACTION_CHECK_CURRENT_STATE = "com.example.bluetoothusage.action.CHECK_CURRENT_STATE"
         const val ACTION_TARGET_CONNECTED = "com.example.bluetoothusage.action.TARGET_CONNECTED"

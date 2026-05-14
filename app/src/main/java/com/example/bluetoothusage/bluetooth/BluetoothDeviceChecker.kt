@@ -11,8 +11,7 @@ import android.content.Context
 import android.content.pm.PackageManager
 import android.os.Build
 import androidx.core.content.ContextCompat
-import kotlinx.coroutines.suspendCancellableCoroutine
-import kotlin.coroutines.resume
+import kotlinx.coroutines.CompletableDeferred
 
 data class PairedBluetoothDevice(
     val name: String,
@@ -22,6 +21,10 @@ data class PairedBluetoothDevice(
 class BluetoothDeviceChecker(private val context: Context) {
     private val bluetoothManager =
         context.getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
+    private val profileLock = Any()
+    private val profileProxies = mutableMapOf<Int, BluetoothProfile>()
+    private val profileRequests = mutableMapOf<Int, CompletableDeferred<BluetoothProfile?>>()
+    private val profileListeners = mutableMapOf<Int, BluetoothProfile.ServiceListener>()
 
     private val adapter: BluetoothAdapter?
         get() = bluetoothManager.adapter
@@ -66,32 +69,92 @@ class BluetoothDeviceChecker(private val context: Context) {
         return isConnectedInProfile(BluetoothProfile.HEADSET, address)
     }
 
+    suspend fun warmUpProfileProxies() {
+        getOrCreateProfileProxy(BluetoothProfile.A2DP)
+        getOrCreateProfileProxy(BluetoothProfile.HEADSET)
+    }
+
+    fun close() {
+        val bluetoothAdapter = adapter
+        val proxies = synchronized(profileLock) {
+            val current = profileProxies.toMap()
+            profileProxies.clear()
+            profileListeners.clear()
+            profileRequests.values.forEach { request ->
+                if (!request.isCompleted) request.complete(null)
+            }
+            profileRequests.clear()
+            current
+        }
+        proxies.forEach { (profile, proxy) ->
+            if (bluetoothAdapter != null) {
+                runCatching { bluetoothAdapter.closeProfileProxy(profile, proxy) }
+            }
+        }
+    }
+
     private suspend fun isConnectedInProfile(profile: Int, address: String): Boolean {
         if (!hasBluetoothConnectPermission()) return false
-        val bluetoothAdapter = adapter ?: return false
+        val proxy = getOrCreateProfileProxy(profile) ?: return false
+        return runCatching {
+            proxy.connectedDevices.any { it.address.equals(address, ignoreCase = true) }
+        }.getOrDefault(false)
+    }
 
-        return suspendCancellableCoroutine { continuation ->
-            val listener = object : BluetoothProfile.ServiceListener {
-                override fun onServiceConnected(profileId: Int, proxy: BluetoothProfile) {
-                    val connected = proxy.connectedDevices.any { it.address == address }
-                    bluetoothAdapter.closeProfileProxy(profile, proxy)
-                    if (continuation.isActive) continuation.resume(connected)
-                }
+    private suspend fun getOrCreateProfileProxy(profile: Int): BluetoothProfile? {
+        if (!hasBluetoothConnectPermission()) return null
+        val cachedProxy = synchronized(profileLock) { profileProxies[profile] }
+        if (cachedProxy != null) return cachedProxy
 
-                override fun onServiceDisconnected(profileId: Int) {
-                    if (continuation.isActive) continuation.resume(false)
+        val bluetoothAdapter = adapter ?: return null
+        var shouldStartRequest = false
+        val request = synchronized(profileLock) {
+            profileRequests[profile] ?: CompletableDeferred<BluetoothProfile?>().also {
+                profileRequests[profile] = it
+                shouldStartRequest = true
+            }
+        }
+
+        if (shouldStartRequest) {
+            startProfileRequest(bluetoothAdapter, profile, request)
+        }
+        return request.await()
+    }
+
+    private fun startProfileRequest(
+        bluetoothAdapter: BluetoothAdapter,
+        profile: Int,
+        request: CompletableDeferred<BluetoothProfile?>
+    ) {
+        val listener = object : BluetoothProfile.ServiceListener {
+            override fun onServiceConnected(profileId: Int, proxy: BluetoothProfile) {
+                synchronized(profileLock) {
+                    profileProxies[profile] = proxy
+                    profileListeners[profile] = this
+                    profileRequests.remove(profile)
                 }
+                if (!request.isCompleted) request.complete(proxy)
             }
 
-            val started = bluetoothAdapter.getProfileProxy(context, listener, profile)
-            if (!started && continuation.isActive) continuation.resume(false)
-
-            continuation.invokeOnCancellation {
-                runCatching {
-                    val emptyProxy: BluetoothProfile? = null
-                    if (emptyProxy != null) bluetoothAdapter.closeProfileProxy(profile, emptyProxy)
+            override fun onServiceDisconnected(profileId: Int) {
+                synchronized(profileLock) {
+                    profileProxies.remove(profile)
+                    profileListeners.remove(profile)
+                    profileRequests.remove(profile)
                 }
+                if (!request.isCompleted) request.complete(null)
             }
+        }
+        synchronized(profileLock) {
+            profileListeners[profile] = listener
+        }
+        val started = bluetoothAdapter.getProfileProxy(context, listener, profile)
+        if (!started) {
+            synchronized(profileLock) {
+                profileListeners.remove(profile)
+                profileRequests.remove(profile)
+            }
+            if (!request.isCompleted) request.complete(null)
         }
     }
 }

@@ -18,7 +18,6 @@ import kotlinx.coroutines.runBlocking
 
 class BluetoothEventReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
-        MonitorStartupReceiver.scheduleNextCheck(context.applicationContext)
         val action = intent.action ?: return
         if (action != BluetoothA2dp.ACTION_CONNECTION_STATE_CHANGED &&
             action != BluetoothHeadset.ACTION_CONNECTION_STATE_CHANGED &&
@@ -31,6 +30,7 @@ class BluetoothEventReceiver : BroadcastReceiver() {
             runBlocking { SettingsRepository(context.applicationContext).targetDevices.first() }
         }.getOrNull().orEmpty()
         if (targets.none { device.address.equals(it.address, ignoreCase = true) }) return
+        MonitorStartupReceiver.refreshSchedule(context.applicationContext)
 
         val serviceIntent = Intent(context, BluetoothMonitorService::class.java).apply {
             putExtra(BluetoothMonitorService.EXTRA_DEVICE_NAME, device.safeName())

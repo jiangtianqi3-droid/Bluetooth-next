@@ -13,6 +13,6 @@ class BluetoothUsageApp : Application() {
 
     override fun onCreate() {
         super.onCreate()
-        MonitorStartupReceiver.scheduleNextCheck(this)
+        MonitorStartupReceiver.refreshSchedule(this)
     }
 }
