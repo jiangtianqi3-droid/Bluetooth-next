@@ -28,10 +28,12 @@ import com.example.bluetoothusage.repository.CurrentAudioInfo
 import com.example.bluetoothusage.repository.MINUTES_PER_DAY
 import com.example.bluetoothusage.repository.TargetDevice
 import com.example.bluetoothusage.repository.UsageSettings
+import java.time.DayOfWeek
 import java.time.Instant
 import java.time.LocalDate
 import java.time.LocalDateTime
 import java.time.ZoneId
+import java.time.temporal.TemporalAdjusters
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -238,7 +240,7 @@ class BluetoothMonitorService : Service() {
                 usageSettings = settings
                 applyConnectionRules()
                 if (activeSessions.isNotEmpty()) {
-                    checkDailyLimit()
+                    checkUsageReminders()
                 }
                 updateNotification()
             }
@@ -314,7 +316,7 @@ class BluetoothMonitorService : Service() {
             while (activeSessions.isNotEmpty()) {
                 delay(LIMIT_CHECK_INTERVAL_MILLIS)
                 if (activeSessions.isNotEmpty()) {
-                    checkDailyLimit()
+                    checkUsageReminders()
                 }
             }
             limitCheckJob = null
@@ -414,7 +416,7 @@ class BluetoothMonitorService : Service() {
             val app = application as BluetoothUsageApp
             app.settingsRepository.setActiveSessions(activeSessions.values.map { it.toInfo() })
             updateMonitoringJobs()
-            checkDailyLimit()
+            checkUsageReminders()
         }
         updateNotification("已连接：${target.name.ifBlank { deviceName }}，正在计时")
     }
@@ -544,6 +546,72 @@ class BluetoothMonitorService : Service() {
         }
     }
 
+    private suspend fun checkUsageReminders() {
+        checkSessionReminder()
+        checkBreakReminder()
+        checkBedtimeReminder()
+        checkDailyLimit()
+        checkWeeklyGoal()
+    }
+
+    private suspend fun checkSessionReminder() {
+        val limit = usageSettings.singleSessionLimitMillis
+        if (limit <= 0 || activeSessions.isEmpty()) return
+        val now = System.currentTimeMillis()
+        val session = activeSessions.values.maxByOrNull { now - it.startTime } ?: return
+        val duration = now - session.startTime
+        if (duration < limit) return
+
+        val key = "${session.deviceAddress.uppercase()}:${session.startTime}:$limit"
+        if (usageSettings.lastSessionLimitAlertKey == key) return
+
+        val app = application as BluetoothUsageApp
+        app.settingsRepository.saveLastSessionLimitAlertKey(key)
+        usageSettings = usageSettings.copy(lastSessionLimitAlertKey = key)
+        postReminderNotification(
+            id = SESSION_LIMIT_NOTIFICATION_ID,
+            title = "单次佩戴时间较长",
+            text = "${session.deviceName} 已连续使用 ${formatDuration(duration)}"
+        )
+    }
+
+    private suspend fun checkBreakReminder() {
+        val limit = usageSettings.breakReminderMillis
+        if (limit <= 0 || activeSessions.isEmpty()) return
+        val now = System.currentTimeMillis()
+        val session = activeSessions.values.maxByOrNull { now - it.startTime } ?: return
+        val duration = now - session.startTime
+        if (duration < limit) return
+
+        val key = "${session.deviceAddress.uppercase()}:${session.startTime}:$limit"
+        if (usageSettings.lastBreakReminderKey == key) return
+
+        val app = application as BluetoothUsageApp
+        app.settingsRepository.saveLastBreakReminderKey(key)
+        usageSettings = usageSettings.copy(lastBreakReminderKey = key)
+        postReminderNotification(
+            id = BREAK_REMINDER_NOTIFICATION_ID,
+            title = "该休息一下了",
+            text = "${session.deviceName} 已连续佩戴 ${formatDuration(duration)}"
+        )
+    }
+
+    private suspend fun checkBedtimeReminder() {
+        if (!usageSettings.bedtimeReminderEnabled || activeSessions.isEmpty()) return
+        val today = LocalDate.now()
+        if (usageSettings.lastBedtimeAlertDate == today.toString()) return
+        if (!isInMinuteWindow(usageSettings.bedtimeReminderStartMinutes, usageSettings.bedtimeReminderEndMinutes)) return
+
+        val app = application as BluetoothUsageApp
+        app.settingsRepository.saveLastBedtimeAlertDate(today.toString())
+        usageSettings = usageSettings.copy(lastBedtimeAlertDate = today.toString())
+        postReminderNotification(
+            id = BEDTIME_REMINDER_NOTIFICATION_ID,
+            title = "已进入睡前提醒时间",
+            text = "耳机仍在使用中，注意给睡眠留一点缓冲。"
+        )
+    }
+
     private suspend fun checkDailyLimit() {
         val limit = usageSettings.dailyLimitMillis
         if (limit <= 0) return
@@ -566,6 +634,33 @@ class BluetoothMonitorService : Service() {
         }
     }
 
+    private suspend fun checkWeeklyGoal() {
+        val limit = usageSettings.weeklyGoalMillis
+        if (limit <= 0) return
+
+        val weekStartDate = LocalDate.now().with(TemporalAdjusters.previousOrSame(DayOfWeek.MONDAY))
+        val weekKey = weekStartDate.toString()
+        if (usageSettings.lastWeeklyGoalAlertWeek == weekKey) return
+
+        val app = application as BluetoothUsageApp
+        val start = todayStartMillis(weekStartDate)
+        val end = todayStartMillis(weekStartDate.plusWeeks(1))
+        val targetAddresses = targetDevices.map { it.address.uppercase() }.toSet()
+        val stored = app.usageRepository.getDurationInRange(start, end, usageSettings, targetAddresses)
+        val active = mergedActiveOverlapMillis(start, end)
+        val total = stored + active
+
+        if (total >= limit) {
+            app.settingsRepository.saveLastWeeklyGoalAlertWeek(weekKey)
+            usageSettings = usageSettings.copy(lastWeeklyGoalAlertWeek = weekKey)
+            postReminderNotification(
+                id = WEEKLY_GOAL_NOTIFICATION_ID,
+                title = "本周使用已达目标",
+                text = "本周已使用 ${formatDuration(total)} / ${formatDuration(limit)}"
+            )
+        }
+    }
+
     private fun postLimitNotification(total: Long, limit: Long) {
         val manager = getSystemService(NotificationManager::class.java)
         val text = "今日已使用 ${formatDuration(total)} / ${formatDuration(limit)}"
@@ -578,6 +673,21 @@ class BluetoothMonitorService : Service() {
             .setPriority(NotificationCompat.PRIORITY_DEFAULT)
             .build()
         manager.notify(LIMIT_NOTIFICATION_ID, notification)
+    }
+
+    private fun postReminderNotification(id: Int, title: String, text: String) {
+        val manager = getSystemService(NotificationManager::class.java)
+        val notification = NotificationCompat.Builder(this, CHANNEL_ID)
+            .setSmallIcon(selectBatteryIcon())
+            .setColor(Color.rgb(20, 120, 255))
+            .setContentTitle(title)
+            .setContentText(text)
+            .setContentIntent(contentIntent())
+            .setAutoCancel(true)
+            .setOnlyAlertOnce(true)
+            .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+            .build()
+        manager.notify(id, notification)
     }
 
     private fun startAsForeground(payload: MonitorNotificationPayload) {
@@ -751,8 +861,10 @@ class BluetoothMonitorService : Service() {
 
     private fun isInSleepWindow(): Boolean {
         if (!usageSettings.sleepEnabled) return false
-        val start = usageSettings.sleepStartMinutes
-        val end = usageSettings.sleepEndMinutes
+        return isInMinuteWindow(usageSettings.sleepStartMinutes, usageSettings.sleepEndMinutes)
+    }
+
+    private fun isInMinuteWindow(start: Int, end: Int): Boolean {
         if (start == end) return false
 
         val now = LocalDateTime.now().toLocalTime()
@@ -902,6 +1014,10 @@ class BluetoothMonitorService : Service() {
         private const val CHANNEL_ID = "bluetooth_monitor"
         private const val NOTIFICATION_ID = 1001
         private const val LIMIT_NOTIFICATION_ID = 1002
+        private const val SESSION_LIMIT_NOTIFICATION_ID = 1003
+        private const val BREAK_REMINDER_NOTIFICATION_ID = 1004
+        private const val WEEKLY_GOAL_NOTIFICATION_ID = 1005
+        private const val BEDTIME_REMINDER_NOTIFICATION_ID = 1006
         private const val CONNECTION_CHECK_INTERVAL_MILLIS = 90_000L
         private const val LIMIT_CHECK_INTERVAL_MILLIS = 5L * 60L * 1_000L
         private const val UNKNOWN_BATTERY_REFRESH_INTERVAL_MILLIS = 10L * 60L * 1_000L

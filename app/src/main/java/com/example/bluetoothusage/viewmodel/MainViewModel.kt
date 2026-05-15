@@ -50,6 +50,12 @@ data class MainUiState(
     val weekMillis: Long = 0,
     val activeSessions: List<ActiveSessionInfo> = emptyList(),
     val dailyLimitMillis: Long = UsageSettings().dailyLimitMillis,
+    val singleSessionLimitMillis: Long = UsageSettings().singleSessionLimitMillis,
+    val breakReminderMillis: Long = UsageSettings().breakReminderMillis,
+    val weeklyGoalMillis: Long = UsageSettings().weeklyGoalMillis,
+    val bedtimeReminderEnabled: Boolean = false,
+    val bedtimeReminderStartMinutes: Int = 23 * 60,
+    val bedtimeReminderEndMinutes: Int = 0,
     val batteryPercent: Int? = null,
     val batteryPercents: Map<String, Int> = emptyMap(),
     val sleepEnabled: Boolean = true,
@@ -159,6 +165,12 @@ class MainViewModel(
             weekMillis = core.totals.weekMillis + activeWeek,
             activeSessions = activeSessions,
             dailyLimitMillis = core.settings.dailyLimitMillis,
+            singleSessionLimitMillis = core.settings.singleSessionLimitMillis,
+            breakReminderMillis = core.settings.breakReminderMillis,
+            weeklyGoalMillis = core.settings.weeklyGoalMillis,
+            bedtimeReminderEnabled = core.settings.bedtimeReminderEnabled,
+            bedtimeReminderStartMinutes = core.settings.bedtimeReminderStartMinutes,
+            bedtimeReminderEndMinutes = core.settings.bedtimeReminderEndMinutes,
             batteryPercent = core.settings.batteryPercent,
             batteryPercents = core.settings.batteryPercents,
             sleepEnabled = core.settings.sleepEnabled,
@@ -270,6 +282,24 @@ class MainViewModel(
         }
     }
 
+    fun setSingleSessionLimitMillis(millis: Long) {
+        viewModelScope.launch {
+            settingsRepository.saveSingleSessionLimitMillis(millis.coerceAtLeast(15L * 60L * 1_000L))
+        }
+    }
+
+    fun setBreakReminderMillis(millis: Long) {
+        viewModelScope.launch {
+            settingsRepository.saveBreakReminderMillis(millis.coerceAtLeast(15L * 60L * 1_000L))
+        }
+    }
+
+    fun setWeeklyGoalMillis(millis: Long) {
+        viewModelScope.launch {
+            settingsRepository.saveWeeklyGoalMillis(millis.coerceAtLeast(60L * 60L * 1_000L))
+        }
+    }
+
     fun setSleepEnabled(enabled: Boolean) {
         val state = uiState.value
         viewModelScope.launch {
@@ -295,6 +325,39 @@ class MainViewModel(
                 state.sleepEnabled,
                 state.sleepStartMinutes,
                 wrapMinutes(state.sleepEndMinutes + deltaMinutes)
+            )
+        }
+    }
+
+    fun setBedtimeReminderEnabled(enabled: Boolean) {
+        val state = uiState.value
+        viewModelScope.launch {
+            settingsRepository.saveBedtimeReminderSettings(
+                enabled,
+                state.bedtimeReminderStartMinutes,
+                state.bedtimeReminderEndMinutes
+            )
+        }
+    }
+
+    fun adjustBedtimeReminderStart(deltaMinutes: Int) {
+        val state = uiState.value
+        viewModelScope.launch {
+            settingsRepository.saveBedtimeReminderSettings(
+                state.bedtimeReminderEnabled,
+                wrapMinutes(state.bedtimeReminderStartMinutes + deltaMinutes),
+                state.bedtimeReminderEndMinutes
+            )
+        }
+    }
+
+    fun adjustBedtimeReminderEnd(deltaMinutes: Int) {
+        val state = uiState.value
+        viewModelScope.launch {
+            settingsRepository.saveBedtimeReminderSettings(
+                state.bedtimeReminderEnabled,
+                state.bedtimeReminderStartMinutes,
+                wrapMinutes(state.bedtimeReminderEndMinutes + deltaMinutes)
             )
         }
     }
@@ -626,7 +689,14 @@ private fun buildDiagnosticsText(state: MainUiState, rawRecords: List<UsageRecor
             appendLine("active ${it.deviceName} ${it.deviceAddress} start=${formatInstant(it.startTime)}")
         }
         appendLine("sleepEnabled=${state.sleepEnabled} sleep=${state.sleepStartMinutes}-${state.sleepEndMinutes}")
-        appendLine("todayMillis=${state.todayMillis} weekMillis=${state.weekMillis} dailyLimit=${state.dailyLimitMillis}")
+        appendLine(
+            "todayMillis=${state.todayMillis} weekMillis=${state.weekMillis} " +
+                "dailyLimit=${state.dailyLimitMillis} weeklyGoal=${state.weeklyGoalMillis}"
+        )
+        appendLine(
+            "reminders singleSession=${state.singleSessionLimitMillis} break=${state.breakReminderMillis} " +
+                "bedtime=${state.bedtimeReminderEnabled} ${state.bedtimeReminderStartMinutes}-${state.bedtimeReminderEndMinutes}"
+        )
         appendLine("batteryPercents=${state.batteryPercents}")
         appendLine("currentAudio=${state.currentAudioInfo}")
         appendLine("lastCleanupSummary=${state.lastCleanupSummary}")

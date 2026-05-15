@@ -41,6 +41,7 @@ import androidx.compose.material.icons.filled.Headphones
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Timer
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
@@ -129,6 +130,12 @@ fun MainScreen(viewModel: MainViewModel) {
             onBack = viewModel::closeSettings,
             onDailyLimitHoursChange = viewModel::setDailyLimitHours,
             onDailyLimitShortcut = viewModel::setDailyLimitMillis,
+            onSingleSessionLimitChange = viewModel::setSingleSessionLimitMillis,
+            onBreakReminderChange = viewModel::setBreakReminderMillis,
+            onWeeklyGoalChange = viewModel::setWeeklyGoalMillis,
+            onBedtimeReminderEnabledChange = viewModel::setBedtimeReminderEnabled,
+            onAdjustBedtimeReminderStart = viewModel::adjustBedtimeReminderStart,
+            onAdjustBedtimeReminderEnd = viewModel::adjustBedtimeReminderEnd,
             onSleepEnabledChange = viewModel::setSleepEnabled,
             onAdjustSleepStart = viewModel::adjustSleepStart,
             onAdjustSleepEnd = viewModel::adjustSleepEnd,
@@ -167,6 +174,7 @@ private fun MainContent(
 ) {
     val pagerState = rememberPagerState(pageCount = { 2 })
     val scope = androidx.compose.runtime.rememberCoroutineScope()
+    var showAudioStats by remember { mutableStateOf(false) }
 
     BackHandler(enabled = pagerState.currentPage == 1) {
         scope.launch { pagerState.animateScrollToPage(0) }
@@ -177,6 +185,11 @@ private fun MainContent(
             TopAppBar(
                 title = { Text("蓝牙耳机计时") },
                 actions = {
+                    IconActionButton(
+                        icon = Icons.Filled.Headphones,
+                        contentDescription = "今天主要听了什么",
+                        onClick = { showAudioStats = true }
+                    )
                     IconActionButton(
                         icon = Icons.Filled.Settings,
                         contentDescription = "设置",
@@ -226,6 +239,12 @@ private fun MainContent(
                 )
             }
         }
+    }
+    if (showAudioStats) {
+        AudioStatsDialog(
+            state = state,
+            onDismiss = { showAudioStats = false }
+        )
     }
 }
 
@@ -471,6 +490,85 @@ private fun GoalCard(
                     )
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun AudioStatsDialog(state: MainUiState, onDismiss: () -> Unit) {
+    val stats = remember(
+        state.history,
+        state.calendarRecords,
+        state.activeSessions,
+        state.currentAudioInfo,
+        state.sleepEnabled,
+        state.sleepStartMinutes,
+        state.sleepEndMinutes
+    ) { state.todayAudioSourceStats() }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        confirmButton = {
+            TextButton(onClick = onDismiss) { Text("关闭") }
+        },
+        title = { Text("今天主要听了什么") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
+                if (stats.isEmpty()) {
+                    Text(
+                        "今天还没有可识别的播放来源。",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                } else {
+                    val total = stats.sumOf { it.durationMillis }.coerceAtLeast(1L)
+                    stats.take(6).forEach { item ->
+                        AudioStatRow(item = item, totalMillis = total)
+                    }
+                }
+            }
+        }
+    )
+}
+
+@Composable
+private fun AudioStatRow(item: AudioSourceStat, totalMillis: Long) {
+    val fraction = (item.durationMillis.toFloat() / totalMillis).coerceIn(0f, 1f)
+    val color = audioCategoryColor(item.category)
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    item.appName,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Text(
+                    item.category,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    style = MaterialTheme.typography.labelSmall
+                )
+            }
+            Text(formatDurationCompact(item.durationMillis), color = MaterialTheme.colorScheme.primary)
+        }
+        Canvas(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(8.dp)
+        ) {
+            drawRoundRect(
+                color = color.copy(alpha = 0.16f),
+                size = size,
+                cornerRadius = androidx.compose.ui.geometry.CornerRadius(99f, 99f)
+            )
+            drawRoundRect(
+                color = color,
+                size = Size(width = size.width * fraction, height = size.height),
+                cornerRadius = androidx.compose.ui.geometry.CornerRadius(99f, 99f)
+            )
         }
     }
 }
@@ -1176,6 +1274,83 @@ fun MainUiState.weekRecords(): List<UsageRecord> {
         .distinctBy { it.id }
         .filter { it.startTime < end && it.endTime > start }
         .sortedBy { it.startTime }
+}
+
+private data class AudioSourceStat(
+    val appName: String,
+    val category: String,
+    val durationMillis: Long
+)
+
+private fun MainUiState.todayAudioSourceStats(): List<AudioSourceStat> {
+    val today = LocalDate.now()
+    val zone = ZoneId.systemDefault()
+    val dayStart = today.atStartOfDay(zone).toInstant().toEpochMilli()
+    val dayEnd = today.plusDays(1).atStartOfDay(zone).toInstant().toEpochMilli()
+    val awakeRanges = ringAwakeIntervals(sleepEnabled, sleepStartMinutes, sleepEndMinutes).map { interval ->
+        today.atStartOfDay(zone).plusMinutes(interval.startMinute.toLong()).toInstant().toEpochMilli() to
+            today.atStartOfDay(zone).plusMinutes(interval.endMinute.toLong()).toInstant().toEpochMilli()
+    }
+    if (awakeRanges.isEmpty()) return emptyList()
+    return todayTimelineRecords()
+        .filter { it.startTime < dayEnd && it.endTime > dayStart }
+        .mapNotNull { record ->
+            val appName = record.audioAppName.ifBlank { return@mapNotNull null }
+            val duration = awakeRanges.sumOf { (awakeStart, awakeEnd) ->
+                val start = maxOf(record.startTime, dayStart, awakeStart)
+                val end = minOf(record.endTime, dayEnd, awakeEnd)
+                (end - start).coerceAtLeast(0L)
+            }
+            if (duration <= 0L) null else Triple(appName, audioCategoryFor(record), duration)
+        }
+        .groupBy { it.first to it.second }
+        .map { (key, values) ->
+            AudioSourceStat(
+                appName = key.first,
+                category = key.second,
+                durationMillis = values.sumOf { it.third }
+            )
+        }
+        .sortedByDescending { it.durationMillis }
+}
+
+private fun audioCategoryFor(record: UsageRecord): String {
+    val source = "${record.audioAppPackage} ${record.audioAppName}".lowercase()
+    return when {
+        source.contains("podcast") ||
+            source.contains("xiaoyuzhou") ||
+            source.contains("小宇宙") ||
+            source.contains("喜马拉雅") ||
+            source.contains("himalaya") -> "播客/音频"
+        source.contains("music") ||
+            source.contains("spotify") ||
+            source.contains("netease") ||
+            source.contains("cloudmusic") ||
+            source.contains("qqmusic") ||
+            source.contains("酷狗") ||
+            source.contains("网易云") ||
+            source.contains("音乐") -> "音乐"
+        source.contains("video") ||
+            source.contains("bilibili") ||
+            source.contains("youtube") ||
+            source.contains("douyin") ||
+            source.contains("抖音") ||
+            source.contains("哔哩") ||
+            source.contains("b站") ||
+            source.contains("腾讯视频") ||
+            source.contains("爱奇艺") ||
+            source.contains("优酷") -> "视频"
+        else -> "其他"
+    }
+}
+
+private fun audioCategoryColor(category: String): Color {
+    return when (category) {
+        "音乐" -> Color(0xFF22C55E)
+        "视频" -> Color(0xFF1478FF)
+        "播客/音频" -> Color(0xFFF97316)
+        else -> Color(0xFF8B5CF6)
+    }
 }
 
 fun formatDuration(durationMillis: Long): String {

@@ -74,10 +74,12 @@ import com.example.bluetoothusage.viewmodel.MainUiState
 import java.time.Instant
 import java.time.DayOfWeek
 import java.time.LocalDate
+import java.time.LocalDateTime
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import kotlin.math.abs
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
 
@@ -565,6 +567,7 @@ fun InteractiveUsageTimeline(
     var renderedExpandedLabelKey by remember(day) { mutableStateOf<String?>(null) }
     var editingRecord by remember(day) { mutableStateOf<UsageRecord?>(null) }
     var pendingAnimatedSelectionAction by remember(day) { mutableStateOf<TimelineSelectionAction?>(null) }
+    var currentMinuteOfDay by remember(day) { mutableStateOf(currentMinuteOfDay()) }
     val density = LocalDensity.current
     val dpPx = remember(density) { with(density) { 1.dp.toPx() } }
     val timelineInsetPx = remember(density) { with(density) { 18.dp.toPx() } }
@@ -650,6 +653,12 @@ fun InteractiveUsageTimeline(
     val visibleSegments = remember(sortedRecords, day, awakeIntervals) {
         sortedRecords.flatMap { record ->
             record.awakeSegments(day, zone, awakeIntervals)
+        }
+    }
+    LaunchedEffect(day) {
+        while (true) {
+            currentMinuteOfDay = currentMinuteOfDay()
+            delay(60_000L)
         }
     }
     val (labelMinOffset, labelMaxOffset) = calculateTimelineLabelOffsetBounds(
@@ -1246,6 +1255,17 @@ fun InteractiveUsageTimeline(
                 )
             }
 
+            timelineLightTickMinutes(awakeIntervals).forEach { minute ->
+                val y = transformY(minuteToAwakeY(minute, awakeIntervals, contentHeight) ?: return@forEach)
+                if (y < -12.dp.toPx() || y > size.height + 12.dp.toPx()) return@forEach
+                drawLine(
+                    color = tickColor.copy(alpha = 0.14f),
+                    start = Offset(stripLeft, y),
+                    end = Offset(stripRight, y),
+                    strokeWidth = 0.7f
+                )
+            }
+
             timelineTickMinutes(awakeIntervals).forEach { minute ->
                 val y = transformY(minuteToAwakeY(minute, awakeIntervals, contentHeight) ?: return@forEach)
                 val major = minute % 360 == 0 || awakeIntervals.any { minute == it.startMinute || minute == it.endMinute }
@@ -1263,6 +1283,27 @@ fun InteractiveUsageTimeline(
                         (y + 4.dp.toPx()).coerceIn(10.dp.toPx(), size.height - 2.dp.toPx()),
                         hourLabelPaint
                     )
+                }
+            }
+
+            if (day == LocalDate.now()) {
+                minuteToAwakeY(currentMinuteOfDay, awakeIntervals, contentHeight)?.let { baseY ->
+                    val y = transformY(baseY)
+                    if (y in -24.dp.toPx()..(size.height + 24.dp.toPx())) {
+                        val lineColor = Color(0xFF1478FF)
+                        drawLine(
+                            color = lineColor.copy(alpha = 0.72f),
+                            start = Offset(stripLeft - 8.dp.toPx(), y),
+                            end = Offset(stripRight + 8.dp.toPx(), y),
+                            strokeWidth = 2.dp.toPx(),
+                            cap = StrokeCap.Round
+                        )
+                        drawCircle(
+                            color = lineColor,
+                            radius = 4.dp.toPx(),
+                            center = Offset(stripRight + 8.dp.toPx(), y)
+                        )
+                    }
                 }
             }
 
@@ -1949,6 +1990,23 @@ private fun timelineTickMinutes(intervals: List<AwakeInterval>): List<Int> {
         }
     }
     return ticks.sorted()
+}
+
+private fun timelineLightTickMinutes(intervals: List<AwakeInterval>): List<Int> {
+    val ticks = mutableSetOf<Int>()
+    intervals.forEach { interval ->
+        var minute = ((interval.startMinute + 59) / 60) * 60
+        while (minute < interval.endMinute) {
+            ticks.add(minute)
+            minute += 60
+        }
+    }
+    return ticks.sorted()
+}
+
+private fun currentMinuteOfDay(): Int {
+    val now = LocalDateTime.now().toLocalTime()
+    return now.hour * 60 + now.minute
 }
 
 private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawAwakeTrackBands(

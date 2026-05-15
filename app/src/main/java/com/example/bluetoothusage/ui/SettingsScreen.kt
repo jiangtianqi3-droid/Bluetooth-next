@@ -43,6 +43,12 @@ fun SettingsScreen(
     onBack: () -> Unit,
     onDailyLimitHoursChange: (Float) -> Unit,
     onDailyLimitShortcut: (Long) -> Unit,
+    onSingleSessionLimitChange: (Long) -> Unit,
+    onBreakReminderChange: (Long) -> Unit,
+    onWeeklyGoalChange: (Long) -> Unit,
+    onBedtimeReminderEnabledChange: (Boolean) -> Unit,
+    onAdjustBedtimeReminderStart: (Int) -> Unit,
+    onAdjustBedtimeReminderEnd: (Int) -> Unit,
     onSleepEnabledChange: (Boolean) -> Unit,
     onAdjustSleepStart: (Int) -> Unit,
     onAdjustSleepEnd: (Int) -> Unit,
@@ -71,6 +77,22 @@ fun SettingsScreen(
                     dailyLimitMillis = state.dailyLimitMillis,
                     onDailyLimitHoursChange = onDailyLimitHoursChange,
                     onDailyLimitShortcut = onDailyLimitShortcut
+                )
+            }
+            item {
+                UsageGoalReminderCard(
+                    singleSessionLimitMillis = state.singleSessionLimitMillis,
+                    breakReminderMillis = state.breakReminderMillis,
+                    weeklyGoalMillis = state.weeklyGoalMillis,
+                    bedtimeEnabled = state.bedtimeReminderEnabled,
+                    bedtimeStartMinutes = state.bedtimeReminderStartMinutes,
+                    bedtimeEndMinutes = state.bedtimeReminderEndMinutes,
+                    onSingleSessionLimitChange = onSingleSessionLimitChange,
+                    onBreakReminderChange = onBreakReminderChange,
+                    onWeeklyGoalChange = onWeeklyGoalChange,
+                    onBedtimeEnabledChange = onBedtimeReminderEnabledChange,
+                    onAdjustBedtimeStart = onAdjustBedtimeReminderStart,
+                    onAdjustBedtimeEnd = onAdjustBedtimeReminderEnd
                 )
             }
             item {
@@ -106,6 +128,104 @@ fun SettingsScreen(
                 )
             }
         }
+    }
+}
+
+@Composable
+private fun UsageGoalReminderCard(
+    singleSessionLimitMillis: Long,
+    breakReminderMillis: Long,
+    weeklyGoalMillis: Long,
+    bedtimeEnabled: Boolean,
+    bedtimeStartMinutes: Int,
+    bedtimeEndMinutes: Int,
+    onSingleSessionLimitChange: (Long) -> Unit,
+    onBreakReminderChange: (Long) -> Unit,
+    onWeeklyGoalChange: (Long) -> Unit,
+    onBedtimeEnabledChange: (Boolean) -> Unit,
+    onAdjustBedtimeStart: (Int) -> Unit,
+    onAdjustBedtimeEnd: (Int) -> Unit
+) {
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp)
+        ) {
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text("目标提醒", style = MaterialTheme.typography.titleMedium)
+                Text(
+                    "这些提醒只提示休息或留意使用时间，不会停止计时。",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            ReminderSliderRow(
+                title = "单次最长",
+                valueMillis = singleSessionLimitMillis,
+                valueRangeHours = 0.5f..4f,
+                steps = 6,
+                onValueChange = onSingleSessionLimitChange
+            )
+            ReminderSliderRow(
+                title = "连续佩戴休息",
+                valueMillis = breakReminderMillis,
+                valueRangeHours = 0.25f..3f,
+                steps = 10,
+                onValueChange = onBreakReminderChange
+            )
+            ReminderSliderRow(
+                title = "每周目标",
+                valueMillis = weeklyGoalMillis,
+                valueRangeHours = 7f..56f,
+                steps = 48,
+                onValueChange = onWeeklyGoalChange
+            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("睡前使用提醒", fontWeight = FontWeight.SemiBold)
+                    Text(
+                        "${formatMinutesOfDay(bedtimeStartMinutes)} - ${formatMinutesOfDay(bedtimeEndMinutes)}",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Switch(checked = bedtimeEnabled, onCheckedChange = onBedtimeEnabledChange)
+            }
+            TimeAdjustRow("睡前开始", bedtimeStartMinutes, bedtimeEnabled, onAdjustBedtimeStart)
+            TimeAdjustRow("睡前结束", bedtimeEndMinutes, bedtimeEnabled, onAdjustBedtimeEnd)
+        }
+    }
+}
+
+@Composable
+private fun ReminderSliderRow(
+    title: String,
+    valueMillis: Long,
+    valueRangeHours: ClosedFloatingPointRange<Float>,
+    steps: Int,
+    onValueChange: (Long) -> Unit
+) {
+    val hours = (valueMillis / (60f * 60f * 1_000f)).coerceIn(valueRangeHours.start, valueRangeHours.endInclusive)
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(title, fontWeight = FontWeight.SemiBold)
+            Text(formatDuration(valueMillis), color = MaterialTheme.colorScheme.primary)
+        }
+        Slider(
+            value = hours,
+            onValueChange = { value ->
+                val roundedQuarterHours = (value * 4f).toInt().coerceAtLeast(1) / 4f
+                onValueChange(hoursToMillis(roundedQuarterHours))
+            },
+            valueRange = valueRangeHours,
+            steps = steps
+        )
     }
 }
 

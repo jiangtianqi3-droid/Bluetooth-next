@@ -32,12 +32,22 @@ data class CurrentAudioInfo(
 
 data class UsageSettings(
     val dailyLimitMillis: Long = DEFAULT_DAILY_LIMIT_MILLIS,
+    val singleSessionLimitMillis: Long = DEFAULT_SINGLE_SESSION_LIMIT_MILLIS,
+    val breakReminderMillis: Long = DEFAULT_BREAK_REMINDER_MILLIS,
+    val weeklyGoalMillis: Long = DEFAULT_WEEKLY_GOAL_MILLIS,
+    val bedtimeReminderEnabled: Boolean = false,
+    val bedtimeReminderStartMinutes: Int = 23 * 60,
+    val bedtimeReminderEndMinutes: Int = 0,
     val sleepEnabled: Boolean = true,
     val sleepStartMinutes: Int = 0,
     val sleepEndMinutes: Int = 390,
     val batteryPercent: Int? = null,
     val batteryPercents: Map<String, Int> = emptyMap(),
     val lastLimitAlertDate: String = "",
+    val lastSessionLimitAlertKey: String = "",
+    val lastBreakReminderKey: String = "",
+    val lastWeeklyGoalAlertWeek: String = "",
+    val lastBedtimeAlertDate: String = "",
     val hideFromRecents: Boolean = false,
     val bootAutoStart: Boolean = true
 )
@@ -45,6 +55,9 @@ data class UsageSettings(
 private val Context.settingsDataStore by preferencesDataStore(name = "settings")
 const val MINUTES_PER_DAY = 24 * 60
 const val DEFAULT_DAILY_LIMIT_MILLIS = 6L * 60L * 60L * 1_000L
+const val DEFAULT_SINGLE_SESSION_LIMIT_MILLIS = 2L * 60L * 60L * 1_000L
+const val DEFAULT_BREAK_REMINDER_MILLIS = 60L * 60L * 1_000L
+const val DEFAULT_WEEKLY_GOAL_MILLIS = DEFAULT_DAILY_LIMIT_MILLIS * 7L
 
 class SettingsRepository(private val context: Context) {
     private val deviceNameKey = stringPreferencesKey("target_device_name")
@@ -55,12 +68,22 @@ class SettingsRepository(private val context: Context) {
     private val activeStartTimeKey = longPreferencesKey("active_start_time")
     private val activeSessionsJsonKey = stringPreferencesKey("active_sessions_json")
     private val dailyLimitMillisKey = longPreferencesKey("daily_limit_millis")
+    private val singleSessionLimitMillisKey = longPreferencesKey("single_session_limit_millis")
+    private val breakReminderMillisKey = longPreferencesKey("break_reminder_millis")
+    private val weeklyGoalMillisKey = longPreferencesKey("weekly_goal_millis")
+    private val bedtimeReminderEnabledKey = booleanPreferencesKey("bedtime_reminder_enabled")
+    private val bedtimeReminderStartMinutesKey = intPreferencesKey("bedtime_reminder_start_minutes")
+    private val bedtimeReminderEndMinutesKey = intPreferencesKey("bedtime_reminder_end_minutes")
     private val sleepEnabledKey = booleanPreferencesKey("sleep_enabled")
     private val sleepStartMinutesKey = intPreferencesKey("sleep_start_minutes")
     private val sleepEndMinutesKey = intPreferencesKey("sleep_end_minutes")
     private val batteryPercentKey = intPreferencesKey("battery_percent")
     private val batteryPercentsJsonKey = stringPreferencesKey("battery_percents_json")
     private val lastLimitAlertDateKey = stringPreferencesKey("last_limit_alert_date")
+    private val lastSessionLimitAlertKey = stringPreferencesKey("last_session_limit_alert_key")
+    private val lastBreakReminderKey = stringPreferencesKey("last_break_reminder_key")
+    private val lastWeeklyGoalAlertWeekKey = stringPreferencesKey("last_weekly_goal_alert_week")
+    private val lastBedtimeAlertDateKey = stringPreferencesKey("last_bedtime_alert_date")
     private val hideFromRecentsKey = booleanPreferencesKey("hide_from_recents")
     private val bootAutoStartKey = booleanPreferencesKey("boot_auto_start")
     private val audioPackageKey = stringPreferencesKey("audio_package")
@@ -95,16 +118,27 @@ class SettingsRepository(private val context: Context) {
 
     val usageSettings: Flow<UsageSettings> = context.settingsDataStore.data.map { prefs ->
         val battery = prefs[batteryPercentKey]?.takeIf { it in 0..100 }
+        val sleepStart = prefs[sleepStartMinutesKey] ?: 0
         UsageSettings(
             dailyLimitMillis = prefs[dailyLimitMillisKey] ?: DEFAULT_DAILY_LIMIT_MILLIS,
+            singleSessionLimitMillis = prefs[singleSessionLimitMillisKey] ?: DEFAULT_SINGLE_SESSION_LIMIT_MILLIS,
+            breakReminderMillis = prefs[breakReminderMillisKey] ?: DEFAULT_BREAK_REMINDER_MILLIS,
+            weeklyGoalMillis = prefs[weeklyGoalMillisKey] ?: DEFAULT_WEEKLY_GOAL_MILLIS,
+            bedtimeReminderEnabled = prefs[bedtimeReminderEnabledKey] ?: false,
+            bedtimeReminderStartMinutes = prefs[bedtimeReminderStartMinutesKey] ?: (23 * 60),
+            bedtimeReminderEndMinutes = prefs[bedtimeReminderEndMinutesKey] ?: sleepStart,
             sleepEnabled = prefs[sleepEnabledKey] ?: true,
-            sleepStartMinutes = prefs[sleepStartMinutesKey] ?: 0,
+            sleepStartMinutes = sleepStart,
             sleepEndMinutes = prefs[sleepEndMinutesKey] ?: 390,
             batteryPercent = battery,
             batteryPercents = decodeBatteryPercents(prefs[batteryPercentsJsonKey]).ifEmpty {
                 battery?.let { mapOf("_legacy" to it) }.orEmpty()
             },
             lastLimitAlertDate = prefs[lastLimitAlertDateKey].orEmpty(),
+            lastSessionLimitAlertKey = prefs[lastSessionLimitAlertKey].orEmpty(),
+            lastBreakReminderKey = prefs[lastBreakReminderKey].orEmpty(),
+            lastWeeklyGoalAlertWeek = prefs[lastWeeklyGoalAlertWeekKey].orEmpty(),
+            lastBedtimeAlertDate = prefs[lastBedtimeAlertDateKey].orEmpty(),
             hideFromRecents = prefs[hideFromRecentsKey] ?: false,
             bootAutoStart = prefs[bootAutoStartKey] ?: true
         )
@@ -204,6 +238,32 @@ class SettingsRepository(private val context: Context) {
         }
     }
 
+    suspend fun saveSingleSessionLimitMillis(limitMillis: Long) {
+        context.settingsDataStore.edit { prefs ->
+            prefs[singleSessionLimitMillisKey] = limitMillis
+        }
+    }
+
+    suspend fun saveBreakReminderMillis(limitMillis: Long) {
+        context.settingsDataStore.edit { prefs ->
+            prefs[breakReminderMillisKey] = limitMillis
+        }
+    }
+
+    suspend fun saveWeeklyGoalMillis(limitMillis: Long) {
+        context.settingsDataStore.edit { prefs ->
+            prefs[weeklyGoalMillisKey] = limitMillis
+        }
+    }
+
+    suspend fun saveBedtimeReminderSettings(enabled: Boolean, startMinutes: Int, endMinutes: Int) {
+        context.settingsDataStore.edit { prefs ->
+            prefs[bedtimeReminderEnabledKey] = enabled
+            prefs[bedtimeReminderStartMinutesKey] = startMinutes.coerceIn(0, MINUTES_PER_DAY - 1)
+            prefs[bedtimeReminderEndMinutesKey] = endMinutes.coerceIn(0, MINUTES_PER_DAY - 1)
+        }
+    }
+
     suspend fun saveSleepSettings(enabled: Boolean, startMinutes: Int, endMinutes: Int) {
         context.settingsDataStore.edit { prefs ->
             prefs[sleepEnabledKey] = enabled
@@ -248,6 +308,30 @@ class SettingsRepository(private val context: Context) {
     suspend fun saveLastLimitAlertDate(date: String) {
         context.settingsDataStore.edit { prefs ->
             prefs[lastLimitAlertDateKey] = date
+        }
+    }
+
+    suspend fun saveLastSessionLimitAlertKey(key: String) {
+        context.settingsDataStore.edit { prefs ->
+            prefs[lastSessionLimitAlertKey] = key
+        }
+    }
+
+    suspend fun saveLastBreakReminderKey(key: String) {
+        context.settingsDataStore.edit { prefs ->
+            prefs[lastBreakReminderKey] = key
+        }
+    }
+
+    suspend fun saveLastWeeklyGoalAlertWeek(week: String) {
+        context.settingsDataStore.edit { prefs ->
+            prefs[lastWeeklyGoalAlertWeekKey] = week
+        }
+    }
+
+    suspend fun saveLastBedtimeAlertDate(date: String) {
+        context.settingsDataStore.edit { prefs ->
+            prefs[lastBedtimeAlertDateKey] = date
         }
     }
 
