@@ -41,8 +41,10 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.CornerRadius
@@ -65,6 +67,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.DialogProperties
 import com.example.bluetoothusage.data.UsageRecord
 import com.example.bluetoothusage.repository.DailyUsage
 import com.example.bluetoothusage.viewmodel.MainUiState
@@ -76,6 +79,7 @@ import java.time.format.DateTimeFormatter
 import kotlin.math.abs
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -87,7 +91,6 @@ fun CalendarScreen(
     onUpdateRecord: (UsageRecord, Long, Long, String) -> Unit
 ) {
     var selectedDay by remember { mutableStateOf<DailyUsage?>(null) }
-    var editingRecord by remember { mutableStateOf<UsageRecord?>(null) }
 
     Scaffold(
         topBar = {
@@ -113,18 +116,8 @@ fun CalendarScreen(
             sleepEnabled = state.sleepEnabled,
             sleepStartMinutes = state.sleepStartMinutes,
             sleepEndMinutes = state.sleepEndMinutes,
-            onRecordClick = { editingRecord = it },
+            onUpdateRecord = onUpdateRecord,
             onDismiss = { selectedDay = null }
-        )
-    }
-    editingRecord?.let { record ->
-        EditRecordDialog(
-            record = record,
-            onDismiss = { editingRecord = null },
-            onSave = { start, end, note ->
-                onUpdateRecord(record, start, end, note)
-                editingRecord = null
-            }
         )
     }
 }
@@ -186,7 +179,6 @@ fun CalendarPage(
     modifier: Modifier = Modifier
 ) {
     var selectedDay by remember { mutableStateOf<DailyUsage?>(null) }
-    var editingRecord by remember { mutableStateOf<UsageRecord?>(null) }
     CalendarContent(
         state = state,
         onPreviousMonth = onPreviousMonth,
@@ -201,18 +193,8 @@ fun CalendarPage(
             sleepEnabled = state.sleepEnabled,
             sleepStartMinutes = state.sleepStartMinutes,
             sleepEndMinutes = state.sleepEndMinutes,
-            onRecordClick = { editingRecord = it },
+            onUpdateRecord = onUpdateRecord,
             onDismiss = { selectedDay = null }
-        )
-    }
-    editingRecord?.let { record ->
-        EditRecordDialog(
-            record = record,
-            onDismiss = { editingRecord = null },
-            onSave = { start, end, note ->
-                onUpdateRecord(record, start, end, note)
-                editingRecord = null
-            }
         )
     }
 }
@@ -444,13 +426,17 @@ fun DayUsageDialog(
     sleepEnabled: Boolean,
     sleepStartMinutes: Int,
     sleepEndMinutes: Int,
-    onRecordClick: (UsageRecord) -> Unit,
+    onUpdateRecord: (UsageRecord, Long, Long, String) -> Unit,
     onDismiss: () -> Unit
 ) {
     val dialogContainerColor = MaterialTheme.colorScheme.surface
     AlertDialog(
         onDismissRequest = onDismiss,
         containerColor = dialogContainerColor,
+        properties = DialogProperties(usePlatformDefaultWidth = false),
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 12.dp),
         title = {
             Text(day.date.format(DateTimeFormatter.ofPattern("M月d日 使用详情")))
         },
@@ -463,20 +449,8 @@ fun DayUsageDialog(
                     sleepEnabled = sleepEnabled,
                     sleepStartMinutes = sleepStartMinutes,
                     sleepEndMinutes = sleepEndMinutes,
-                    onRecordClick = onRecordClick
+                    onUpdateRecord = onUpdateRecord
                 )
-                if (records.isEmpty()) {
-                    Text("当天暂无已保存的使用记录。", color = MaterialTheme.colorScheme.onSurfaceVariant)
-                } else {
-                    LazyColumn(
-                        modifier = Modifier.height(160.dp),
-                        verticalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        items(records, key = { it.id }) { record ->
-                            TimelineRecordRow(day = day.date, record = record)
-                        }
-                    }
-                }
             }
         },
         confirmButton = {
@@ -543,14 +517,14 @@ private fun SpectrumTimeline(
     sleepEnabled: Boolean,
     sleepStartMinutes: Int,
     sleepEndMinutes: Int,
-    onRecordClick: (UsageRecord) -> Unit = {}
+    onUpdateRecord: (UsageRecord, Long, Long, String) -> Unit = { _, _, _, _ -> }
 ) = InteractiveUsageTimeline(
     day = day,
     records = records,
     sleepEnabled = sleepEnabled,
     sleepStartMinutes = sleepStartMinutes,
     sleepEndMinutes = sleepEndMinutes,
-    onRecordClick = onRecordClick,
+    onUpdateRecord = onUpdateRecord,
     modifier = Modifier
         .fillMaxWidth()
         .height(460.dp)
@@ -571,7 +545,7 @@ fun InteractiveUsageTimeline(
     maxZoom: Float = 5f,
     doubleTapZoomToLatest: Boolean = false,
     initialAnchorLatest: Boolean = false,
-    onRecordClick: (UsageRecord) -> Unit = {}
+    onUpdateRecord: (UsageRecord, Long, Long, String) -> Unit = { _, _, _, _ -> }
 ) {
     var zoom by remember { mutableFloatStateOf(minZoom) }
     var zoomAnimationJob by remember { mutableStateOf<Job?>(null) }
@@ -587,6 +561,10 @@ fun InteractiveUsageTimeline(
     var initialWindowLock by remember(day) { mutableStateOf<TimelineOffsetBounds?>(null) }
     var userInteracted by remember(day) { mutableStateOf(false) }
     var anchoredLatestRecordKey by remember(day) { mutableStateOf<String?>(null) }
+    var activeExpandedLabelKey by remember(day) { mutableStateOf<String?>(null) }
+    var renderedExpandedLabelKey by remember(day) { mutableStateOf<String?>(null) }
+    var editingRecord by remember(day) { mutableStateOf<UsageRecord?>(null) }
+    var pendingAnimatedSelectionAction by remember(day) { mutableStateOf<TimelineSelectionAction?>(null) }
     val density = LocalDensity.current
     val dpPx = remember(density) { with(density) { 1.dp.toPx() } }
     val timelineInsetPx = remember(density) { with(density) { 18.dp.toPx() } }
@@ -619,7 +597,7 @@ fun InteractiveUsageTimeline(
     val titlePaint = remember(density, labelColor) {
         Paint(Paint.ANTI_ALIAS_FLAG).apply {
             color = labelColor.toArgb()
-            textSize = with(density) { 13.sp.toPx() }
+            textSize = with(density) { 14.sp.toPx() }
             typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
         }
     }
@@ -629,17 +607,17 @@ fun InteractiveUsageTimeline(
             textSize = with(density) { 11.sp.toPx() }
         }
     }
+    val appNamePaint = remember(density) {
+        Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color(0xFF0066CC).toArgb()
+            textSize = with(density) { 11.sp.toPx() }
+        }
+    }
     val boundaryTimePaint = remember(density, supportingColor) {
         Paint(Paint.ANTI_ALIAS_FLAG).apply {
             color = supportingColor.copy(alpha = 0.88f).toArgb()
             textSize = with(density) { 9.sp.toPx() }
             textAlign = Paint.Align.LEFT
-        }
-    }
-    val appNamePaint = remember(density) {
-        Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color(0xFF0066CC).toArgb()
-            textSize = with(density) { 11.sp.toPx() }
         }
     }
     fun isMinimumZoom(zoomValue: Float): Boolean = zoomValue <= minZoom + 0.025f
@@ -658,16 +636,29 @@ fun InteractiveUsageTimeline(
         if (isMinimumZoom(zoomValue) || zoomValue <= 1f) return 0f
         return screenY - timelineTopFor(zoomValue) - contentY * zoomValue
     }
-    val isAtMinimumZoom = isMinimumZoom(zoom)
-    val labelMinOffset = calculateTimelineLabelMinOffset(
-        day = day,
-        records = records,
-        sleepEnabled = sleepEnabled,
-        sleepStartMinutes = sleepStartMinutes,
-        sleepEndMinutes = sleepEndMinutes,
+    val sortedRecords = remember(records, day) {
+        val dayStart = day.atStartOfDay(zone).toInstant().toEpochMilli()
+        val dayEnd = day.plusDays(1).atStartOfDay(zone).toInstant().toEpochMilli()
+        records
+            .filter { it.startTime < dayEnd && it.endTime > dayStart }
+            .sortedBy { it.startTime }
+            .dedupeTimelineRecords()
+    }
+    val awakeIntervals = remember(sleepEnabled, sleepStartMinutes, sleepEndMinutes) {
+        awakeIntervals(sleepEnabled, sleepStartMinutes, sleepEndMinutes)
+    }
+    val visibleSegments = remember(sortedRecords, day, awakeIntervals) {
+        sortedRecords.flatMap { record ->
+            record.awakeSegments(day, zone, awakeIntervals)
+        }
+    }
+    val (labelMinOffset, labelMaxOffset) = calculateTimelineLabelOffsetBounds(
+        segments = visibleSegments,
+        awakeIntervals = awakeIntervals,
         canvasHeight = canvasHeight,
         contentHeight = viewportHeight,
         timelineInsetPx = timelineInsetPx,
+        minZoom = minZoom,
         dpPx = dpPx
     )
     fun timelineBoundsFor(zoomValue: Float): TimelineOffsetBounds? = calculateUsageTimelineOffsetBounds(
@@ -677,7 +668,7 @@ fun InteractiveUsageTimeline(
     val timelineBounds = timelineBoundsFor(zoom)
     fun applyDragDelta(delta: Float): Float {
         if (isMinimumZoom(zoom)) {
-            val next = (labelOffsetY + delta).coerceIn(labelMinOffset, 0f)
+            val next = (labelOffsetY + delta).coerceIn(labelMinOffset, labelMaxOffset)
             val consumed = next - labelOffsetY
             labelOffsetY = next
             if (consumed != 0f) labelLayerDirection = consumed
@@ -692,7 +683,7 @@ fun InteractiveUsageTimeline(
     }
 
     fun canDragTimeline(): Boolean {
-        return !isMinimumZoom(zoom) || labelMinOffset < 0f
+        return !isMinimumZoom(zoom) || labelMinOffset < 0f || labelMaxOffset > 0f
     }
 
     fun endPinch() {
@@ -776,16 +767,111 @@ fun InteractiveUsageTimeline(
         }
     }
 
-    val sortedRecords = remember(records, day) {
-        val dayStart = day.atStartOfDay(zone).toInstant().toEpochMilli()
-        val dayEnd = day.plusDays(1).atStartOfDay(zone).toInstant().toEpochMilli()
-        records
-            .filter { it.startTime < dayEnd && it.endTime > dayStart }
-            .sortedBy { it.startTime }
-            .dedupeTimelineRecords()
-    }
     val latestRecordKey = remember(sortedRecords) {
         sortedRecords.maxByOrNull { it.endTime }?.let { "${it.id}:${it.endTime}" }
+    }
+    val expandedProgress by animateFloatAsState(
+        targetValue = if (activeExpandedLabelKey != null) 1f else 0f,
+        animationSpec = tween(durationMillis = 260),
+        label = "timeline-label-expand"
+    )
+    val autoExpandLabels = !isMinimumZoom(zoom) && zoom >= 2.35f
+    val autoExpandProgress by animateFloatAsState(
+        targetValue = if (autoExpandLabels) 1f else 0f,
+        animationSpec = tween(durationMillis = 220),
+        label = "timeline-label-auto-expand"
+    )
+    val positionedLabels = buildTimelinePositionedLabels(
+        segments = visibleSegments,
+        awakeIntervals = awakeIntervals,
+        canvasWidth = canvasWidth,
+        canvasHeight = canvasHeight,
+        contentHeight = viewportHeight,
+        zoom = zoom,
+        timelineInsetPx = timelineTopFor(zoom),
+        offsetY = visualOffsetFor(zoom, offsetY),
+        labelOffsetY = if (isMinimumZoom(zoom)) labelOffsetY.coerceIn(labelMinOffset, labelMaxOffset) else 0f,
+        stackLabels = isMinimumZoom(zoom),
+        labelLayerDirection = labelLayerDirection,
+        dpPx = dpPx,
+        titlePaint = titlePaint,
+        detailPaint = detailPaint,
+        appNamePaint = appNamePaint,
+        labelStyle = defaultLabelStyle,
+        expandedLabelKey = renderedExpandedLabelKey,
+        expandedProgress = expandedProgress,
+        autoExpandProgress = autoExpandProgress,
+        viewportFadeHeight = canvasHeight
+    )
+    val latestPositionedLabelsState = rememberUpdatedState(positionedLabels)
+
+    fun expandLabel(item: TimelineLabelDrawItem) {
+        renderedExpandedLabelKey = item.key
+        activeExpandedLabelKey = item.key
+    }
+
+    fun collapseLabel() {
+        activeExpandedLabelKey = null
+    }
+
+    fun applyPendingSelectionAction(action: TimelineSelectionAction?) {
+        when (action) {
+            null -> Unit
+            TimelineSelectionAction.Collapse -> collapseLabel()
+            is TimelineSelectionAction.Expand -> positionedLabels
+                .firstOrNull { it.item.key == action.labelKey }
+                ?.item
+                ?.let(::expandLabel)
+        }
+    }
+
+    fun performSelectionAction(action: TimelineSelectionAction?) {
+        when (action) {
+            null -> Unit
+            TimelineSelectionAction.Collapse -> collapseLabel()
+            is TimelineSelectionAction.Expand -> {
+                if (activeExpandedLabelKey != null && activeExpandedLabelKey != action.labelKey) {
+                    pendingAnimatedSelectionAction = action
+                    collapseLabel()
+                } else {
+                    pendingAnimatedSelectionAction = null
+                    applyPendingSelectionAction(action)
+                }
+            }
+        }
+    }
+
+    fun requestSelectionAction(action: TimelineSelectionAction) {
+        performSelectionAction(action)
+    }
+
+    LaunchedEffect(activeExpandedLabelKey, renderedExpandedLabelKey, expandedProgress) {
+        if (
+            activeExpandedLabelKey == null &&
+            renderedExpandedLabelKey != null &&
+            pendingAnimatedSelectionAction is TimelineSelectionAction.Expand &&
+            expandedProgress <= 0.45f
+        ) {
+            val nextAction = pendingAnimatedSelectionAction
+            renderedExpandedLabelKey = null
+            pendingAnimatedSelectionAction = null
+            applyPendingSelectionAction(nextAction)
+        } else if (activeExpandedLabelKey == null && renderedExpandedLabelKey != null && expandedProgress <= 0.01f) {
+            val nextAction = pendingAnimatedSelectionAction
+            renderedExpandedLabelKey = null
+            pendingAnimatedSelectionAction = null
+            if (nextAction != null) {
+                applyPendingSelectionAction(nextAction)
+            }
+        }
+    }
+
+    LaunchedEffect(sortedRecords) {
+        if (renderedExpandedLabelKey != null && positionedLabels.none { it.item.key == renderedExpandedLabelKey }) {
+            activeExpandedLabelKey = null
+            renderedExpandedLabelKey = null
+            pendingAnimatedSelectionAction = null
+        }
     }
 
     fun anchorToLatestUsage(immediate: Boolean) {
@@ -829,9 +915,11 @@ fun InteractiveUsageTimeline(
         }
     }
 
-    Canvas(
-        modifier = modifier
-            .onSizeChanged {
+    Box(modifier = modifier) {
+        Canvas(
+            modifier = Modifier
+                .fillMaxSize()
+                .onSizeChanged {
                 canvasWidth = it.width.toFloat()
                 canvasHeight = it.height.toFloat()
                 viewportHeight = (canvasHeight - timelineInsetPx * 2f).coerceAtLeast(1f)
@@ -855,9 +943,22 @@ fun InteractiveUsageTimeline(
                 }
                 val effectiveBounds = initialWindowLock ?: timelineBounds
                 offsetY = clampTimelineOffset(offsetY, zoom, viewportHeight, effectiveBounds)
-                labelOffsetY = labelOffsetY.coerceIn(labelMinOffset, 0f)
+                labelOffsetY = labelOffsetY.coerceIn(labelMinOffset, labelMaxOffset)
             }
-            .pointerInput(day, records, minZoom, maxZoom, sleepEnabled, sleepStartMinutes, sleepEndMinutes, doubleTapZoomToLatest) {
+            .pointerInput(
+                day,
+                records,
+                minZoom,
+                maxZoom,
+                sleepEnabled,
+                sleepStartMinutes,
+                sleepEndMinutes,
+                doubleTapZoomToLatest,
+                canvasWidth,
+                canvasHeight,
+                viewportHeight,
+                labelMinOffset
+            ) {
                 var lastTapTime = 0L
                 var lastTapPosition = Offset.Zero
                 awaitEachGesture {
@@ -867,19 +968,54 @@ fun InteractiveUsageTimeline(
                     flingAnimationJob?.cancel()
                     flingAnimationJob = null
                     val downPosition = down.position
-                    val downStartedInLabelArea = downPosition.x >= canvasWidth * 0.42f
+                    val labelColumnLeft = latestPositionedLabelsState.value.minOfOrNull { it.itemLeft } ?: (canvasWidth * 0.42f)
+                    val downStartedInLabelArea = downPosition.x >= labelColumnLeft
                     var lastDragPosition = downPosition
                     var lastDragTime = down.uptimeMillis
+                    var lastPointerTime = down.uptimeMillis
                 var lastPosition = downPosition
                 var dragVelocityY = 0f
                 var maxMovement = 0f
                 var handledAsPinch = false
                 var handledAsDrag = false
+                var handledAsLongPress = false
+                var verticalDragLocked = false
+                var horizontalDragRejected = false
+                val longPressEditMillis = 360L
                 var pinchStartedFromMinimum = false
                 var pinchAnchorContentY: Float? = null
-                val dragSlop = 8f * dpPx
+                val dragSlop = if (downStartedInLabelArea) 18f * dpPx else 8f * dpPx
+                fun hitTimelineLabel(position: Offset): PositionedTimelineLabel? {
+                    return latestPositionedLabelsState.value
+                        .asReversed()
+                        .firstOrNull { placed ->
+                            val top = placed.item.labelTop
+                            val bottom = placed.item.labelTop + placed.item.labelBoxHeight
+                            val left = placed.itemLeft
+                            val right = placed.itemLeft + placed.item.labelBoxWidth
+                            position.x in left..right && position.y in top..bottom && placed.item.alpha > 0.001f
+                        }
+                }
+                val labelPressedAtDown = hitTimelineLabel(downPosition)
                 while (true) {
-                        val event = awaitPointerEvent()
+                        val event = if (
+                            !handledAsLongPress &&
+                            !handledAsPinch &&
+                            labelPressedAtDown != null &&
+                            maxMovement < dragSlop
+                        ) {
+                            val remainingMillis = (longPressEditMillis - (lastPointerTime - down.uptimeMillis)).coerceAtLeast(1L)
+                            withTimeoutOrNull(remainingMillis) { awaitPointerEvent() }
+                        } else {
+                            awaitPointerEvent()
+                        }
+                        if (event == null) {
+                            editingRecord = labelPressedAtDown?.item?.record
+                            requestSelectionAction(TimelineSelectionAction.Collapse)
+                            handledAsLongPress = true
+                            continue
+                        }
+                        lastPointerTime = event.changes.maxOfOrNull { it.uptimeMillis } ?: lastPointerTime
                         val pressedChanges = event.changes.filter { it.pressed }
                         if (pressedChanges.isNotEmpty()) {
                             val position = pressedChanges.first().position
@@ -887,6 +1023,38 @@ fun InteractiveUsageTimeline(
                             val dx = position.x - downPosition.x
                             val dy = position.y - downPosition.y
                             maxMovement = maxOf(maxMovement, kotlin.math.sqrt(dx * dx + dy * dy))
+                            if (
+                                !verticalDragLocked &&
+                                !horizontalDragRejected &&
+                                !handledAsPinch &&
+                                !handledAsLongPress &&
+                                maxMovement > dragSlop
+                            ) {
+                                val absDx = abs(dx)
+                                val absDy = abs(dy)
+                                when {
+                                    absDx > absDy * 1.12f -> horizontalDragRejected = true
+                                    absDy > absDx * 1.12f -> verticalDragLocked = true
+                                }
+                            }
+                        }
+                        if (
+                            !handledAsLongPress &&
+                            !handledAsPinch &&
+                            labelPressedAtDown != null &&
+                            pressedChanges.size == 1 &&
+                            maxMovement < dragSlop &&
+                            lastPointerTime - down.uptimeMillis >= longPressEditMillis
+                        ) {
+                            editingRecord = labelPressedAtDown.item.record
+                            requestSelectionAction(TimelineSelectionAction.Collapse)
+                            handledAsLongPress = true
+                            pressedChanges.forEach { it.consume() }
+                        }
+                        if (handledAsLongPress) {
+                            pressedChanges.forEach { it.consume() }
+                            if (event.changes.none { it.pressed }) break
+                            continue
                         }
                         if (pressedChanges.size > 1) {
                             handledAsPinch = true
@@ -941,8 +1109,9 @@ fun InteractiveUsageTimeline(
                             event.changes.forEach { it.consume() }
                         } else if (
                             !handledAsPinch &&
+                            !horizontalDragRejected &&
+                            verticalDragLocked &&
                             pressedChanges.size == 1 &&
-                            (!isMinimumZoom(zoom) || downStartedInLabelArea) &&
                             canDragTimeline()
                         ) {
                             val change = pressedChanges.first()
@@ -969,16 +1138,23 @@ fun InteractiveUsageTimeline(
                     if (!handledAsPinch && handledAsDrag && !isMinimumZoom(zoom)) {
                         flingTimeline(dragVelocityY)
                     }
-                    if (!handledAsPinch && !handledAsDrag && maxMovement < 24f * dpPx) {
+                    val tapMovementLimit = if (downStartedInLabelArea) 48f * dpPx else 36f * dpPx
+                    if (!handledAsPinch && !handledAsDrag && !handledAsLongPress && maxMovement < tapMovementLimit) {
                         val tapOffset = lastPosition
-                        val hitZoom = zoom
-                        val hitInset = timelineTopFor(hitZoom)
                         val now = System.currentTimeMillis()
                         val timeSinceLastTap = now - lastTapTime
                         val lastDx = tapOffset.x - lastTapPosition.x
                         val lastDy = tapOffset.y - lastTapPosition.y
                         val lastTapDistance = kotlin.math.sqrt(lastDx * lastDx + lastDy * lastDy)
-                        if (timeSinceLastTap < 300 && lastTapDistance < 100f) {
+                        val tappedLabel = hitTimelineLabel(downPosition) ?: hitTimelineLabel(tapOffset)
+                        if (tappedLabel != null) {
+                            when {
+                                renderedExpandedLabelKey == tappedLabel.item.key -> Unit
+                                else -> requestSelectionAction(TimelineSelectionAction.Expand(tappedLabel.item.key))
+                            }
+                            lastTapTime = now
+                            lastTapPosition = tapOffset
+                        } else if (!downStartedInLabelArea && timeSinceLastTap < 300 && lastTapDistance < 100f) {
                             zoomAnimationJob?.cancel()
                             zoomAnimationJob = null
                             val oldZoom = zoom
@@ -1011,43 +1187,27 @@ fun InteractiveUsageTimeline(
                                 )
                             }
                             if (isMinimumZoom(newZoom) || newZoom <= 1f) {
-                                labelOffsetY = labelOffsetY.coerceIn(labelMinOffset, 0f)
+                                labelOffsetY = labelOffsetY.coerceIn(labelMinOffset, labelMaxOffset)
                             } else {
                                 labelOffsetY = 0f
                             }
                             animateZoomTo(newZoom, targetOffsetY)
                             lastTapTime = 0L
                         } else {
-                            findTimelineLabelRecord(
-                                tapOffset = tapOffset,
-                                day = day,
-                                records = records,
-                                sleepEnabled = sleepEnabled,
-                                sleepStartMinutes = sleepStartMinutes,
-                                sleepEndMinutes = sleepEndMinutes,
-                                canvasWidth = canvasWidth,
-                                canvasHeight = canvasHeight,
-                                contentHeight = viewportHeight,
-                                timelineInsetPx = hitInset,
-                                dpPx = dpPx,
-                                zoom = hitZoom,
-                                offsetY = if (isMinimumZoom(zoom)) 0f else offsetY,
-                                labelOffsetY = if (isMinimumZoom(zoom)) labelOffsetY else 0f,
-                                stackLabels = isMinimumZoom(zoom)
-                            )?.let(onRecordClick)
+                            if (!autoExpandLabels && renderedExpandedLabelKey != null) {
+                                requestSelectionAction(TimelineSelectionAction.Collapse)
+                            }
                             lastTapTime = now
                             lastTapPosition = tapOffset
                         }
                     }
                 }
             }
-    ) {
+        ) {
         val hasUsage = sortedRecords.isNotEmpty()
-        val awakeIntervals = awakeIntervals(sleepEnabled, sleepStartMinutes, sleepEndMinutes)
         val contentHeight = (size.height - timelineInsetPx * 2f).coerceAtLeast(1f)
         val drawZoom = zoom
         val drawOffsetY = visualOffsetFor(zoom, offsetY)
-        val activeLabelOffsetY = if (isAtMinimumZoom) labelOffsetY.coerceIn(labelMinOffset, 0f) else 0f
         val stripWidth = (34.dp.toPx() + (drawZoom - 1f) * 10.dp.toPx()).coerceAtMost(76.dp.toPx())
         val centerX = if (hasUsage) maxOf(84.dp.toPx(), size.width * 0.22f) else size.width / 2f
         val stripLeft = centerX - stripWidth / 2f
@@ -1106,18 +1266,10 @@ fun InteractiveUsageTimeline(
                 }
             }
 
-            var nextRightY = 28.dp.toPx()
-            val labelPadding = 10.dp.toPx()
-            val labelBoxLeft = maxOf(stripRight + 72.dp.toPx(), size.width * 0.46f)
-                .coerceAtMost(size.width - 96.dp.toPx())
-            val labelBoxRight = size.width - 2.dp.toPx()
-            val labelAvailableWidth = (labelBoxRight - labelBoxLeft).coerceAtLeast(84.dp.toPx())
-            val labelBoxHeight = 40.dp.toPx()
             val labelCorner = CornerRadius(10.dp.toPx(), 10.dp.toPx())
             var lastRightBoundaryY = -10_000f
             val boundaryGapProgress = ((zoom - 2.25f) / 2.75f).coerceIn(0f, 1f)
             val boundaryMinGap = 24.dp.toPx() - boundaryGapProgress * 12.dp.toPx()
-            val labelDrawItems = mutableListOf<TimelineLabelDrawItem>()
 
             fun drawBoundaryTime(minute: Int, y: Float) {
                 if (zoom < 2.25f || y < 12.dp.toPx() || y > size.height - 8.dp.toPx()) return
@@ -1136,106 +1288,43 @@ fun InteractiveUsageTimeline(
                 lastRightBoundaryY = y
             }
 
-            val visibleSegments = sortedRecords.flatMap { record ->
-                record.awakeSegments(day, zone, awakeIntervals)
-            }
             visibleSegments.forEach { segment ->
                 val y1 = transformY(minuteToAwakeY(segment.startMinute, awakeIntervals, contentHeight) ?: return@forEach)
                 val y2 = transformY(minuteToAwakeY(segment.endMinute, awakeIntervals, contentHeight) ?: return@forEach)
-                val midY = (y1 + y2) / 2f
                 if (y2 < -80.dp.toPx() || y1 > size.height + 80.dp.toPx()) return@forEach
                 val baseColor = palette[Math.floorMod(segment.record.deviceAddress.hashCode(), palette.size)]
                 val durationMinutes = (segment.endMinute - segment.startMinute).coerceAtLeast(1)
                 val color = baseColor.copy(alpha = durationAlpha(durationMinutes))
 
-                drawRect(
-                    color = color,
-                    topLeft = Offset(stripLeft, y1),
-                    size = Size(stripWidth, (y2 - y1).coerceAtLeast(5.dp.toPx()))
-                )
-                drawLine(
-                    color = boundaryColor,
-                    start = Offset(stripLeft, y1),
-                    end = Offset(stripRight, y1),
-                    strokeWidth = 1.4.dp.toPx()
-                )
-                drawLine(
-                    color = boundaryColor,
-                    start = Offset(stripLeft, y2),
-                    end = Offset(stripRight, y2),
-                    strokeWidth = 1.4.dp.toPx()
-                )
+                clipPath(stripPath) {
+                    drawRect(
+                        color = color,
+                        topLeft = Offset(stripLeft, y1),
+                        size = Size(stripWidth, (y2 - y1).coerceAtLeast(5.dp.toPx()))
+                    )
+                    drawLine(
+                        color = boundaryColor,
+                        start = Offset(stripLeft, y1),
+                        end = Offset(stripRight, y1),
+                        strokeWidth = 1.4.dp.toPx()
+                    )
+                    drawLine(
+                        color = boundaryColor,
+                        start = Offset(stripLeft, y2),
+                        end = Offset(stripRight, y2),
+                        strokeWidth = 1.4.dp.toPx()
+                    )
+                }
                 drawBoundaryTime(segment.startMinute, y1)
                 drawBoundaryTime(segment.endMinute, y2)
-
-                val hasAppName = zoom > 2.0f && segment.record.audioAppName.isNotBlank()
-                val currentLabelGap = if (hasAppName) 60.dp.toPx() else 50.dp.toPx()
-                val baseLabelY = if (isAtMinimumZoom) maxOf(midY, nextRightY) else midY
-                if (isAtMinimumZoom) {
-                    nextRightY = baseLabelY + currentLabelGap
-                }
-                val labelY = baseLabelY + activeLabelOffsetY
-
-                val currentLabelBoxHeight = if (hasAppName) 56.dp.toPx() else labelBoxHeight
-                val labelCenterY = labelY
-                val labelTop = labelCenterY - currentLabelBoxHeight / 2f
-                val labelAlpha = minOf(rangeAlpha(midY, size.height), rangeAlpha(labelCenterY, size.height))
-                if (labelAlpha <= 0.03f) return@forEach
-
-                val title = formatDuration(segment.durationMillis)
-                val detail = "${formatMinuteOfDay(segment.startMinute)} - ${formatMinuteOfDay(segment.endMinute)}"
-                val appName = segment.record.audioAppName
-                val appNameText = if (hasAppName) appName else ""
-                val labelStyle = timelineLabelStyleFor(segment.record, defaultLabelStyle)
-                val maxTextWidth = if (hasAppName) {
-                    maxOf(titlePaint.measureText(title), detailPaint.measureText(detail), detailPaint.measureText(appNameText))
-                } else {
-                    maxOf(titlePaint.measureText(title), detailPaint.measureText(detail))
-                }
-                val measuredWidth = maxTextWidth + labelPadding * 2f
-                val labelBoxWidth = measuredWidth.coerceIn(86.dp.toPx(), labelAvailableWidth)
-                labelDrawItems += TimelineLabelDrawItem(
-                    color = color,
-                    midY = midY,
-                    labelCenterY = labelCenterY,
-                    labelTop = labelTop,
-                    labelBoxWidth = labelBoxWidth,
-                    labelBoxHeight = currentLabelBoxHeight,
-                    alpha = labelAlpha,
-                    title = title,
-                    detail = detail,
-                    appName = appNameText,
-                    hasAppName = hasAppName,
-                    style = labelStyle
-                )
-            }
-
-            val laidOutLabels = layoutTimelineLabelItems(
-                items = labelDrawItems,
-                stackLabels = isAtMinimumZoom,
-                viewportHeight = size.height,
-                gap = 8.dp.toPx(),
-                topPadding = 12.dp.toPx(),
-                bottomPadding = 12.dp.toPx()
-            )
-            val orderedLabels = if (isAtMinimumZoom && labelLayerDirection > 0f) {
-                laidOutLabels.asReversed()
-            } else {
-                laidOutLabels
-            }
-            val positionedLabels = orderedLabels.map { item ->
-                val itemLeft = (labelBoxRight - item.labelBoxWidth).coerceAtLeast(labelBoxLeft)
-                PositionedTimelineLabel(
-                    item = item,
-                    itemLeft = itemLeft,
-                    textX = itemLeft + labelPadding
-                )
             }
 
             positionedLabels.forEach { placed ->
+                if (placed.item.alpha <= 0.01f) return@forEach
+                val connectorStartY = placed.item.connectorY
                 drawLine(
                     color = placed.item.color.copy(alpha = 0.82f * placed.item.alpha),
-                    start = Offset(stripRight, placed.item.midY),
+                    start = Offset(stripRight, connectorStartY),
                     end = Offset(placed.itemLeft, placed.item.labelCenterY),
                     strokeWidth = 3.dp.toPx(),
                     cap = StrokeCap.Round
@@ -1244,6 +1333,8 @@ fun InteractiveUsageTimeline(
 
             positionedLabels.forEach { placed ->
                 val item = placed.item
+                if (item.alpha <= 0.01f) return@forEach
+                val contentProgress = item.expansionProgress
                 drawRoundRect(
                     color = item.style.background.copy(alpha = 0.92f * item.alpha),
                     topLeft = Offset(placed.itemLeft, item.labelTop),
@@ -1259,16 +1350,22 @@ fun InteractiveUsageTimeline(
                 )
 
                 titlePaint.textAlign = Paint.Align.LEFT
-                detailPaint.textAlign = Paint.Align.LEFT
                 titlePaint.color = item.style.text.copy(alpha = item.alpha).toArgb()
-                detailPaint.color = item.style.supportingText.copy(alpha = item.alpha).toArgb()
-                drawContext.canvas.nativeCanvas.drawText(item.title, placed.textX, item.labelTop + 16.dp.toPx(), titlePaint)
-                drawContext.canvas.nativeCanvas.drawText(item.detail, placed.textX, item.labelTop + 32.dp.toPx(), detailPaint)
-                
-                if (item.hasAppName) {
-                    appNamePaint.color = item.style.appText.copy(alpha = item.alpha).toArgb()
-                    appNamePaint.alpha = (item.alpha * 255).toInt()
-                    drawContext.canvas.nativeCanvas.drawText(item.appName, placed.textX, item.labelTop + 46.dp.toPx(), appNamePaint)
+                if (contentProgress > 0.05f) {
+                    val titleBaseline = item.labelTop + lerpFloat(item.labelBoxHeight / 2f + 4.dp.toPx(), 17.dp.toPx(), contentProgress)
+                    drawContext.canvas.nativeCanvas.drawText(item.title, placed.textX, titleBaseline, titlePaint)
+
+                    val detailAlpha = item.alpha * contentProgress
+                    detailPaint.color = item.style.supportingText.copy(alpha = detailAlpha).toArgb()
+                    drawContext.canvas.nativeCanvas.drawText(item.detail, placed.textX, item.labelTop + 33.dp.toPx(), detailPaint)
+
+                    if (item.hasAppName) {
+                        appNamePaint.color = item.style.appText.copy(alpha = detailAlpha).toArgb()
+                        drawContext.canvas.nativeCanvas.drawText(item.appName, placed.textX, item.labelTop + 49.dp.toPx(), appNamePaint)
+                    }
+                } else {
+                    val collapsedTextBaseline = item.labelTop + item.labelBoxHeight / 2f + 4.dp.toPx()
+                    drawContext.canvas.nativeCanvas.drawText(item.title, placed.textX, collapsedTextBaseline, titlePaint)
                 }
             }
 
@@ -1294,6 +1391,19 @@ fun InteractiveUsageTimeline(
                 size = Size(size.width, fadeHeight)
             )
         }
+        }
+
+    }
+
+    editingRecord?.let { record ->
+        EditRecordDialog(
+            record = record,
+            onDismiss = { editingRecord = null },
+            onSave = { start, end, note ->
+                onUpdateRecord(record, start, end, note)
+                editingRecord = null
+            }
+        )
     }
 }
 
@@ -1368,37 +1478,6 @@ private fun CompactDayStrip(
     }
 }
 
-@Composable
-private fun TimelineRecordRow(day: LocalDate, record: UsageRecord) {
-    val color = devicePalette()[Math.floorMod(record.deviceAddress.hashCode(), devicePalette().size)]
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Canvas(modifier = Modifier.size(12.dp)) {
-            drawCircle(color)
-        }
-        Column(modifier = Modifier.weight(1f)) {
-            Text(record.deviceName, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            Text(
-                "${record.clippedTimeText(day)} · ${formatDuration(record.overlapMillis(day))}",
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                style = MaterialTheme.typography.bodySmall
-            )
-            if (record.audioAppName.isNotBlank()) {
-                Text(
-                    "${record.audioAppName}${record.mediaTitleSnapshot.takeIf { it.isNotBlank() }?.let { " · $it" }.orEmpty()}",
-                    color = MaterialTheme.colorScheme.primary,
-                    style = MaterialTheme.typography.bodySmall,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-            }
-        }
-    }
-}
-
 private fun List<UsageRecord>.recordsForDay(day: LocalDate): List<UsageRecord> {
     val zone = ZoneId.systemDefault()
     val start = day.atStartOfDay(zone).toInstant().toEpochMilli()
@@ -1432,18 +1511,26 @@ private data class AwakeRecordSegment(
 }
 
 private data class TimelineLabelDrawItem(
+    val key: String,
+    val record: UsageRecord,
     val color: Color,
     val midY: Float,
+    val segmentTopY: Float,
+    val segmentBottomY: Float,
+    val connectorY: Float,
     val labelCenterY: Float,
     val labelTop: Float,
     val labelBoxWidth: Float,
     val labelBoxHeight: Float,
+    val expansionProgress: Float,
     val alpha: Float,
     val title: String,
     val detail: String,
     val appName: String,
     val hasAppName: Boolean,
-    val style: TimelineLabelStyle
+    val style: TimelineLabelStyle,
+    val startMinute: Int,
+    val endMinute: Int
 )
 
 private data class PositionedTimelineLabel(
@@ -1459,6 +1546,136 @@ private data class TimelineLabelStyle(
     val supportingText: Color,
     val appText: Color
 )
+
+private sealed interface TimelineSelectionAction {
+    data object Collapse : TimelineSelectionAction
+    data class Expand(val labelKey: String) : TimelineSelectionAction
+}
+
+private fun buildTimelinePositionedLabels(
+    segments: List<AwakeRecordSegment>,
+    awakeIntervals: List<AwakeInterval>,
+    canvasWidth: Float,
+    canvasHeight: Float,
+    contentHeight: Float,
+    zoom: Float,
+    timelineInsetPx: Float,
+    offsetY: Float,
+    labelOffsetY: Float,
+    stackLabels: Boolean,
+    labelLayerDirection: Float,
+    dpPx: Float,
+    titlePaint: Paint,
+    detailPaint: Paint,
+    appNamePaint: Paint,
+    labelStyle: TimelineLabelStyle,
+    expandedLabelKey: String?,
+    expandedProgress: Float,
+    autoExpandProgress: Float,
+    viewportFadeHeight: Float
+): List<PositionedTimelineLabel> {
+    if (canvasWidth <= 0f || canvasHeight <= 0f || contentHeight <= 0f || segments.isEmpty()) return emptyList()
+    val stripWidth = (34f * dpPx + (zoom - 1f) * 10f * dpPx).coerceAtMost(76f * dpPx)
+    val centerX = maxOf(84f * dpPx, canvasWidth * 0.22f)
+    val stripRight = centerX + stripWidth / 2f
+    val labelPadding = 12f * dpPx
+    val labelBoxLeft = maxOf(stripRight + 44f * dpPx, canvasWidth * 0.36f).coerceAtMost(canvasWidth - 132f * dpPx)
+    val labelBoxRight = canvasWidth - 4f * dpPx
+    val labelAvailableWidth = (labelBoxRight - labelBoxLeft).coerceAtLeast(84f * dpPx)
+    fun transformY(baseY: Float): Float = timelineInsetPx + baseY * zoom + offsetY
+
+    var nextRightY = 28f * dpPx
+    val collapsedHeight = 32f * dpPx
+    val rawItems = segments.mapNotNull { segment ->
+        val startY = minuteToAwakeY(segment.startMinute, awakeIntervals, contentHeight) ?: return@mapNotNull null
+        val endY = minuteToAwakeY(segment.endMinute, awakeIntervals, contentHeight) ?: return@mapNotNull null
+        val y1 = transformY(startY)
+        val y2 = transformY(endY)
+        val midY = (y1 + y2) / 2f
+        val segmentTopY = minOf(y1, y2)
+        val segmentBottomY = maxOf(y1, y2)
+        val connectorY = if (stackLabels) {
+            midY
+        } else if (segmentBottomY >= 0f && segmentTopY <= canvasHeight) {
+            (segmentTopY.coerceIn(0f, canvasHeight) + segmentBottomY.coerceIn(0f, canvasHeight)) / 2f
+        } else {
+            midY.coerceIn(0f, canvasHeight)
+        }
+        val hasAppName = segment.record.audioAppName.isNotBlank()
+        val title = formatDuration(segment.durationMillis)
+        val detail = "${formatMinuteOfDay(segment.startMinute)} - ${formatMinuteOfDay(segment.endMinute)}"
+        val appNameText = if (hasAppName) segment.record.audioAppName else ""
+        val style = timelineLabelStyleFor(segment.record, labelStyle)
+        val collapsedWidth = (titlePaint.measureText(title) + labelPadding * 2f).coerceIn(98f * dpPx, labelAvailableWidth)
+        val expandedTextWidth = maxOf(
+            titlePaint.measureText(title),
+            detailPaint.measureText(detail),
+            if (hasAppName) appNamePaint.measureText(appNameText) else 0f
+        ) + labelPadding * 2f
+        val expandedWidth = expandedTextWidth.coerceIn(collapsedWidth, labelAvailableWidth)
+        val expandedHeight = if (hasAppName) 68f * dpPx else 52f * dpPx
+        val labelKey = "${segment.record.id}:${segment.startMinute}:${segment.endMinute}"
+        val progress = maxOf(autoExpandProgress, if (labelKey == expandedLabelKey) expandedProgress else 0f)
+        val currentWidth = lerpFloat(collapsedWidth, expandedWidth, progress)
+        val currentHeight = lerpFloat(collapsedHeight, expandedHeight, progress)
+        val baseLabelY = if (stackLabels) maxOf(midY, nextRightY) else midY
+        if (stackLabels) {
+            nextRightY = baseLabelY + maxOf(40f * dpPx, currentHeight + 8f * dpPx)
+        }
+        val labelCenterY = baseLabelY + if (stackLabels) labelOffsetY else 0f
+        val alpha = if (stackLabels) {
+            rangeAlpha(labelCenterY, viewportFadeHeight)
+        } else {
+            segmentVisibilityAlpha(segmentTopY, segmentBottomY, viewportFadeHeight)
+        }
+        TimelineLabelDrawItem(
+            key = labelKey,
+            record = segment.record,
+            color = segmentColor(segment),
+            midY = midY,
+            segmentTopY = segmentTopY,
+            segmentBottomY = segmentBottomY,
+            connectorY = connectorY,
+            labelCenterY = labelCenterY,
+            labelTop = labelCenterY - currentHeight / 2f,
+            labelBoxWidth = currentWidth,
+            labelBoxHeight = currentHeight,
+            expansionProgress = progress,
+            alpha = alpha,
+            title = title,
+            detail = detail,
+            appName = appNameText,
+            hasAppName = hasAppName,
+            style = style,
+            startMinute = segment.startMinute,
+            endMinute = segment.endMinute
+        )
+    }
+    val laidOutLabels = if (!stackLabels) {
+        layoutZoomedTimelineLabelItems(
+            items = rawItems,
+            viewportHeight = canvasHeight,
+            gap = 10f * dpPx,
+            topPadding = 12f * dpPx,
+            bottomPadding = 12f * dpPx
+        )
+    } else {
+        layoutStackedTimelineLabelItems(
+            items = rawItems,
+            gap = 10f * dpPx,
+            viewportHeight = canvasHeight
+        )
+    }
+    val orderedLabels = if (stackLabels && labelLayerDirection > 0f) laidOutLabels.asReversed() else laidOutLabels
+    return orderedLabels.map { item ->
+        val itemLeft = (labelBoxRight - item.labelBoxWidth).coerceAtLeast(labelBoxLeft)
+        PositionedTimelineLabel(
+            item = item,
+            itemLeft = itemLeft,
+            textX = itemLeft + labelPadding
+        )
+    }
+}
 
 private fun layoutTimelineLabelItems(
     items: List<TimelineLabelDrawItem>,
@@ -1480,6 +1697,80 @@ private fun layoutTimelineLabelItems(
     }
 }
 
+private fun layoutStackedTimelineLabelItems(
+    items: List<TimelineLabelDrawItem>,
+    gap: Float,
+    viewportHeight: Float
+): List<TimelineLabelDrawItem> {
+    if (items.size < 2) return items
+    val sorted = items.sortedBy { it.labelCenterY }
+    val centers = FloatArray(sorted.size) { index -> sorted[index].labelCenterY }
+    val halfHeights = sorted.map { it.labelBoxHeight / 2f }
+
+    for (i in 1 until sorted.size) {
+        val minCenter = centers[i - 1] + halfHeights[i - 1] + gap + halfHeights[i]
+        if (centers[i] < minCenter) centers[i] = minCenter
+    }
+
+    val laidOut = sorted.mapIndexed { index, item ->
+        val center = centers[index]
+        item.copy(
+            labelCenterY = center,
+            labelTop = center - item.labelBoxHeight / 2f,
+            alpha = rangeAlpha(center, viewportHeight)
+        )
+    }.associateBy { it.key }
+
+    return items.map { laidOut[it.key] ?: it }
+}
+
+private fun layoutZoomedTimelineLabelItems(
+    items: List<TimelineLabelDrawItem>,
+    viewportHeight: Float,
+    gap: Float,
+    topPadding: Float,
+    bottomPadding: Float
+): List<TimelineLabelDrawItem> {
+    if (items.isEmpty() || viewportHeight <= 0f) return items
+    val visible = items.filter { it.alpha > 0.01f }
+    if (visible.isEmpty()) return items.map { it.copy(alpha = 0f) }
+
+    val sorted = visible.sortedBy { it.labelCenterY }
+    val centers = FloatArray(sorted.size)
+    val halfHeights = sorted.map { it.labelBoxHeight / 2f }
+    val topLimit = topPadding
+    val bottomLimit = viewportHeight - bottomPadding
+
+    sorted.forEachIndexed { index, item ->
+        centers[index] = item.labelCenterY.coerceIn(
+            topLimit + halfHeights[index],
+            bottomLimit - halfHeights[index]
+        )
+    }
+
+    for (i in 1 until sorted.size) {
+        val minCenter = centers[i - 1] + halfHeights[i - 1] + gap + halfHeights[i]
+        if (centers[i] < minCenter) centers[i] = minCenter
+    }
+    for (i in sorted.size - 2 downTo 0) {
+        val maxCenter = centers[i + 1] - halfHeights[i + 1] - gap - halfHeights[i]
+        if (centers[i] > maxCenter) centers[i] = maxCenter
+    }
+
+    val laidOut = sorted.mapIndexed { index, item ->
+        val center = centers[index]
+        val anchorDistance = abs(center - item.labelCenterY)
+        val elasticAlpha = 1f - (anchorDistance / (viewportHeight * 0.55f)).coerceIn(0f, 0.7f)
+        item.copy(
+            labelCenterY = center,
+            labelTop = center - item.labelBoxHeight / 2f,
+            alpha = item.alpha * rangeAlpha(center, viewportHeight) * elasticAlpha
+        )
+    }.associateBy { it.key }
+
+    return items.map { laidOut[it.key] ?: it.copy(alpha = 0f) }
+}
+
 private fun List<TimelineLabelDrawItem>.avoidTimelineLabelOverlap(
     viewportHeight: Float,
     gap: Float,
@@ -1497,6 +1788,31 @@ private fun List<TimelineLabelDrawItem>.avoidTimelineLabelOverlap(
     }
 
     val sorted = sortedBy { it.labelCenterY }
+    val expandedIndex = sorted.indexOfFirst { it.labelBoxHeight > 36f }
+    if (expandedIndex >= 0) {
+        val halfHeights = sorted.map { it.labelBoxHeight / 2f }
+        val centers = FloatArray(sorted.size)
+        val expanded = sorted[expandedIndex]
+        centers[expandedIndex] = expanded.labelCenterY.coerceIn(
+            topPadding + halfHeights[expandedIndex],
+            viewportHeight - bottomPadding - halfHeights[expandedIndex]
+        )
+
+        for (i in expandedIndex - 1 downTo 0) {
+            val maxCenter = centers[i + 1] - halfHeights[i + 1] - gap - halfHeights[i]
+            centers[i] = minOf(sorted[i].labelCenterY, maxCenter)
+        }
+
+        for (i in expandedIndex + 1 until sorted.size) {
+            val minCenter = centers[i - 1] + halfHeights[i - 1] + gap + halfHeights[i]
+            centers[i] = maxOf(sorted[i].labelCenterY, minCenter)
+        }
+
+        return sorted.mapIndexed { index, item ->
+            item.withLabelCenter(centers[index], viewportHeight)
+        }
+    }
+
     val centers = FloatArray(sorted.size)
     val halfHeights = sorted.map { it.labelBoxHeight / 2f }
 
@@ -1513,10 +1829,15 @@ private fun List<TimelineLabelDrawItem>.avoidTimelineLabelOverlap(
     val overflow = centers[lastIdx] + halfHeights[lastIdx] - bottomLimit
     if (overflow > 0f) {
         for (i in 0..lastIdx) {
-            centers[i] = (centers[i] - overflow).coerceAtLeast(
-                if (i == 0) topPadding + halfHeights[0]
-                else centers[i - 1] + halfHeights[i - 1] + gap + halfHeights[i]
-            )
+            centers[i] -= overflow
+        }
+        // Don't push the first label above the top bound; clamp it back
+        val firstMin = topPadding + halfHeights[0]
+        if (centers[0] < firstMin) {
+            val correction = firstMin - centers[0]
+            for (i in 0..lastIdx) {
+                centers[i] += correction
+            }
         }
     }
 
@@ -1529,7 +1850,7 @@ private fun TimelineLabelDrawItem.withLabelCenter(center: Float, viewportHeight:
     return copy(
         labelCenterY = center,
         labelTop = center - labelBoxHeight / 2f,
-        alpha = minOf(rangeAlpha(midY, viewportHeight), rangeAlpha(center, viewportHeight))
+        alpha = rangeAlpha(center, viewportHeight)
     )
 }
 
@@ -1566,152 +1887,40 @@ private fun timelineLabelStyleFor(record: UsageRecord, defaultStyle: TimelineLab
     }
 }
 
-private fun findTimelineLabelRecord(
-    tapOffset: Offset,
-    day: LocalDate,
-    records: List<UsageRecord>,
-    sleepEnabled: Boolean,
-    sleepStartMinutes: Int,
-    sleepEndMinutes: Int,
-    canvasWidth: Float,
+private fun calculateTimelineLabelOffsetBounds(
+    segments: List<AwakeRecordSegment>,
+    awakeIntervals: List<AwakeInterval>,
     canvasHeight: Float,
     contentHeight: Float,
     timelineInsetPx: Float,
-    dpPx: Float,
-    zoom: Float,
-    offsetY: Float,
-    labelOffsetY: Float,
-    stackLabels: Boolean
-): UsageRecord? {
-    if (canvasWidth <= 0f || canvasHeight <= 0f || contentHeight <= 0f) return null
-    val zone = ZoneId.systemDefault()
-    val dayStart = day.atStartOfDay(zone).toInstant().toEpochMilli()
-    val dayEnd = day.plusDays(1).atStartOfDay(zone).toInstant().toEpochMilli()
-    val sortedRecords = records
-        .filter { it.id > 0 && it.startTime < dayEnd && it.endTime > dayStart }
-        .sortedBy { it.startTime }
-    if (sortedRecords.isEmpty()) return null
-
-    val awakeIntervals = awakeIntervals(sleepEnabled, sleepStartMinutes, sleepEndMinutes)
-    val stripWidth = (34f * dpPx + (zoom - 1f) * 10f * dpPx).coerceAtMost(76f * dpPx)
-    val centerX = maxOf(84f * dpPx, canvasWidth * 0.22f)
-    val stripRight = centerX + stripWidth / 2f
-    val labelBoxLeft = maxOf(stripRight + 72f * dpPx, canvasWidth * 0.46f)
-        .coerceAtMost(canvasWidth - 96f * dpPx)
-    val labelBoxRight = canvasWidth - 2f * dpPx
-    val labelBoxHeight = 40f * dpPx
-    val labelAvailableWidth = (labelBoxRight - labelBoxLeft).coerceAtLeast(84f * dpPx)
-    val minLabelGap = 50f * dpPx
-    var nextRightY = 28f * dpPx
-    val hitLabelStyle = TimelineLabelStyle(
-        background = Color.Transparent,
-        border = Color.Transparent,
-        text = Color.Transparent,
-        supportingText = Color.Transparent,
-        appText = Color.Transparent
-    )
-
-    fun transformY(baseY: Float): Float = timelineInsetPx + baseY * zoom + offsetY
-
-    val rawItems = sortedRecords
-        .flatMap { it.awakeSegments(day, zone, awakeIntervals) }
-        .mapNotNull { segment ->
-            val startBaseY = minuteToAwakeY(segment.startMinute, awakeIntervals, contentHeight) ?: return@mapNotNull null
-            val endBaseY = minuteToAwakeY(segment.endMinute, awakeIntervals, contentHeight) ?: return@mapNotNull null
-            val y1 = transformY(startBaseY)
-            val y2 = transformY(endBaseY)
-            val midY = (y1 + y2) / 2f
-            val baseLabelY = if (stackLabels) maxOf(midY, nextRightY) else midY
-            if (stackLabels) {
-                nextRightY = baseLabelY + minLabelGap
-            }
-            val labelY = baseLabelY + if (stackLabels) labelOffsetY else 0f
-            val labelAlpha = minOf(rangeAlpha(midY, canvasHeight), rangeAlpha(labelY, canvasHeight))
-            if (labelAlpha <= 0.08f) {
-                return@mapNotNull null
-            }
-            val hasAppName = zoom > 2.0f && segment.record.audioAppName.isNotBlank()
-            val currentLabelBoxHeight = if (hasAppName) 56f * dpPx else labelBoxHeight
-            TimelineLabelDrawItem(
-                color = Color.Transparent,
-                midY = midY,
-                labelCenterY = labelY,
-                labelTop = labelY - currentLabelBoxHeight / 2f,
-                labelBoxWidth = labelAvailableWidth,
-                labelBoxHeight = currentLabelBoxHeight,
-                alpha = labelAlpha,
-                title = "",
-                detail = "",
-                appName = "",
-                hasAppName = hasAppName,
-                style = hitLabelStyle
-            ) to segment.record
-        }
-    val laidOut = layoutTimelineLabelItems(
-        items = rawItems.map { it.first },
-        stackLabels = stackLabels,
-        viewportHeight = canvasHeight,
-        gap = 8f * dpPx,
-        topPadding = 12f * dpPx,
-        bottomPadding = 12f * dpPx
-    )
-    laidOut.zip(rawItems.map { it.second }).forEach { (item, record) ->
-        val labelTop = item.labelTop
-        val labelBottom = labelTop + item.labelBoxHeight
-        if (
-            item.alpha > 0.08f &&
-            tapOffset.x in labelBoxLeft..labelBoxRight &&
-            tapOffset.y in labelTop..labelBottom
-        ) {
-            return record
-        }
-    }
-    return null
-}
-
-private fun calculateTimelineLabelMinOffset(
-    day: LocalDate,
-    records: List<UsageRecord>,
-    sleepEnabled: Boolean,
-    sleepStartMinutes: Int,
-    sleepEndMinutes: Int,
-    canvasHeight: Float,
-    contentHeight: Float,
-    timelineInsetPx: Float,
+    minZoom: Float,
     dpPx: Float
-): Float {
-    if (canvasHeight <= 0f || contentHeight <= 0f || records.isEmpty()) return 0f
-    val zone = ZoneId.systemDefault()
-    val dayStart = day.atStartOfDay(zone).toInstant().toEpochMilli()
-    val dayEnd = day.plusDays(1).atStartOfDay(zone).toInstant().toEpochMilli()
-    val awakeIntervals = awakeIntervals(sleepEnabled, sleepStartMinutes, sleepEndMinutes)
-    val segments = records
-        .filter { it.startTime < dayEnd && it.endTime > dayStart }
-        .flatMap { it.awakeSegments(day, zone, awakeIntervals) }
-    if (segments.isEmpty()) return 0f
+): Pair<Float, Float> {
+    if (canvasHeight <= 0f || contentHeight <= 0f || segments.isEmpty()) return Pair(0f, 0f)
 
-    val minDrawZoom = 0.88f
-    val timelineTop = timelineInsetPx + (contentHeight - contentHeight * minDrawZoom) / 2f
-    val minLabelGap = 50f * dpPx
-    val labelBoxHeight = 40f * dpPx
-    val bottomPadding = 8f * dpPx
+    val minDrawZoom = minZoom
+    val timelineTop = timelineInsetPx + (contentHeight - contentHeight * minDrawZoom).coerceAtLeast(0f) / 2f
+    val minLabelGap = 40f * dpPx
+    val collapsedHeight = 32f * dpPx
     var nextRightY = 28f * dpPx
-    var lastMidY = 0f
-    var lastBaseLabelY = 0f
-    var maxLabelBottom = 0f
-    segments.forEach { segment ->
+    var lastLabelCenter = 0f
+    var firstLabelCenter = Float.MAX_VALUE
+    val sorted = segments
+        .sortedWith(compareBy<AwakeRecordSegment> { it.startMinute }.thenBy { it.endMinute }.thenBy { it.record.id })
+    sorted.forEach { segment ->
         val y1 = timelineTop + (minuteToAwakeY(segment.startMinute, awakeIntervals, contentHeight) ?: return@forEach) * minDrawZoom
         val y2 = timelineTop + (minuteToAwakeY(segment.endMinute, awakeIntervals, contentHeight) ?: return@forEach) * minDrawZoom
         val midY = (y1 + y2) / 2f
         val baseLabelY = maxOf(midY, nextRightY)
-        nextRightY = baseLabelY + minLabelGap
-        lastMidY = midY
-        lastBaseLabelY = baseLabelY
-        maxLabelBottom = maxOf(maxLabelBottom, baseLabelY + labelBoxHeight / 2f)
+        nextRightY = baseLabelY + maxOf(minLabelGap, collapsedHeight + 8f * dpPx)
+        lastLabelCenter = baseLabelY
+        if (firstLabelCenter > 1e6f) firstLabelCenter = baseLabelY
     }
-    val alignLastLabelWithSegment = lastMidY - lastBaseLabelY
-    val keepLastLabelInsideViewport = canvasHeight - bottomPadding - maxLabelBottom
-    return minOf(0f, alignLastLabelWithSegment, keepLastLabelInsideViewport)
+    val targetLastLabelY = canvasHeight * 0.75f
+    val minOffset = minOf(0f, targetLastLabelY - lastLabelCenter)
+    val targetFirstLabelY = canvasHeight * 0.25f
+    val maxOffset = maxOf(0f, targetFirstLabelY - firstLabelCenter)
+    return Pair(minOffset, maxOffset)
 }
 
 private fun awakeIntervals(enabled: Boolean, sleepStartMinutes: Int, sleepEndMinutes: Int): List<AwakeInterval> {
@@ -1871,6 +2080,16 @@ private fun rangeAlpha(y: Float, viewportHeight: Float): Float {
     }
 }
 
+private fun segmentVisibilityAlpha(top: Float, bottom: Float, viewportHeight: Float): Float {
+    val fade = 72f
+    return when {
+        bottom < -fade || top > viewportHeight + fade -> 0f
+        bottom < fade -> ((bottom + fade) / (fade * 2f)).coerceIn(0f, 1f)
+        top > viewportHeight - fade -> ((viewportHeight + fade - top) / (fade * 2f)).coerceIn(0f, 1f)
+        else -> 1f
+    }
+}
+
 private fun UsageRecord.awakeSegments(
     day: LocalDate,
     zone: ZoneId,
@@ -1898,6 +2117,17 @@ private fun minuteOfDay(timeMillis: Long, day: LocalDate, zone: ZoneId): Int {
     return (time.hour * 60 + time.minute).coerceIn(0, 1439)
 }
 
+private fun lerpFloat(start: Float, end: Float, fraction: Float): Float {
+    return start + (end - start) * fraction.coerceIn(0f, 1f)
+}
+
+private fun segmentColor(segment: AwakeRecordSegment): Color {
+    val palette = devicePalette()
+    val baseColor = palette[Math.floorMod(segment.record.deviceAddress.hashCode(), palette.size)]
+    val durationMinutes = (segment.endMinute - segment.startMinute).coerceAtLeast(1)
+    return baseColor.copy(alpha = durationAlpha(durationMinutes))
+}
+
 private fun durationAlpha(durationMinutes: Int): Float {
     return when {
         durationMinutes < 10 -> 0.36f
@@ -1906,25 +2136,6 @@ private fun durationAlpha(durationMinutes: Int): Float {
         durationMinutes < 120 -> 0.82f
         else -> 0.96f
     }
-}
-
-private fun UsageRecord.overlapMillis(day: LocalDate): Long {
-    val zone = ZoneId.systemDefault()
-    val start = day.atStartOfDay(zone).toInstant().toEpochMilli()
-    val end = day.plusDays(1).atStartOfDay(zone).toInstant().toEpochMilli()
-    return (minOf(endTime, end) - maxOf(startTime, start)).coerceAtLeast(0)
-}
-
-private fun UsageRecord.clippedTimeText(day: LocalDate): String {
-    val zone = ZoneId.systemDefault()
-    val start = day.atStartOfDay(zone).toInstant().toEpochMilli()
-    val end = day.plusDays(1).atStartOfDay(zone).toInstant().toEpochMilli()
-    return "${formatClock(maxOf(startTime, start))} - ${formatClock(minOf(endTime, end))}"
-}
-
-private fun formatClock(timeMillis: Long): String {
-    val time = Instant.ofEpochMilli(timeMillis).atZone(ZoneId.systemDefault()).toLocalTime()
-    return "%02d:%02d".format(time.hour, time.minute)
 }
 
 private fun formatMinuteOfDay(minute: Int): String {

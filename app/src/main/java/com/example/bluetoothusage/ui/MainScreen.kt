@@ -207,7 +207,7 @@ private fun MainContent(
     ) { padding ->
         HorizontalPager(
                     state = pagerState,
-                    beyondViewportPageCount = 1,
+                    beyondViewportPageCount = 0,
                     modifier = Modifier
                         .fillMaxSize()
                         .padding(padding)
@@ -235,7 +235,6 @@ private fun HomePage(
     onSelectDevice: () -> Unit,
     onUpdateRecord: (UsageRecord, Long, Long, String) -> Unit
 ) {
-    var editingRecord by remember { mutableStateOf<UsageRecord?>(null) }
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -245,20 +244,10 @@ private fun HomePage(
         HeroStatusCard(state = state, onSelectDevice = onSelectDevice)
         GoalCard(
             state = state,
-            onRecordClick = { record -> editingRecord = record },
+            onUpdateRecord = onUpdateRecord,
             modifier = Modifier
                 .fillMaxWidth()
                 .weight(1f)
-        )
-    }
-    editingRecord?.let { record ->
-        EditRecordDialog(
-            record = record,
-            onDismiss = { editingRecord = null },
-            onSave = { start, end, note ->
-                onUpdateRecord(record, start, end, note)
-                editingRecord = null
-            }
         )
     }
 }
@@ -378,7 +367,7 @@ private fun DeviceStatusRow(
 @Composable
 private fun GoalCard(
     state: MainUiState,
-    onRecordClick: (UsageRecord) -> Unit,
+    onUpdateRecord: (UsageRecord, Long, Long, String) -> Unit,
     modifier: Modifier = Modifier
 ) {
     var showClockView by remember { mutableStateOf(false) }
@@ -461,7 +450,7 @@ private fun GoalCard(
                         sleepEnabled = state.sleepEnabled,
                         sleepStartMinutes = state.sleepStartMinutes,
                         sleepEndMinutes = state.sleepEndMinutes,
-                        onEditRecord = onRecordClick,
+                        onEditRecord = {},
                         modifier = Modifier.fillMaxSize()
                     )
                 } else {
@@ -477,7 +466,7 @@ private fun GoalCard(
                         minZoom = 0.88f,
                         doubleTapZoomToLatest = true,
                         initialAnchorLatest = true,
-                        onRecordClick = onRecordClick,
+                        onUpdateRecord = onUpdateRecord,
                         modifier = Modifier.fillMaxSize()
                     )
                 }
@@ -557,14 +546,6 @@ private fun TodayCircularTimeline(
             modifier = Modifier
                 .fillMaxSize()
                 .pointerInput(day, records) {
-                    var previousAngle = Float.NaN
-                    var angularVelocity = 0f
-                    var lastTime = 0L
-                    val velocitySamples = mutableListOf<Float>()
-                    var tapStartTime = 0L
-                    var initialDownPos = Offset.Zero
-                    var isInRingArea = false
-
                     awaitEachGesture {
                         val down = awaitFirstDown()
                         val center = Offset(size.width / 2f, size.height / 2f)
@@ -581,20 +562,19 @@ private fun TodayCircularTimeline(
                         }
 
                         isDraggingRing = true
-                        isInRingArea = true
-                        previousAngle = Float.NaN
-                        lastTime = System.currentTimeMillis()
-                        velocitySamples.clear()
-                        angularVelocity = 0f
-                        tapStartTime = System.currentTimeMillis()
-                        initialDownPos = down.position
+                        var isInRingArea = true
+                        var previousAngle = Float.NaN
+                        var lastTime = System.currentTimeMillis()
+                        val velocitySamples = mutableListOf<Float>()
+                        var angularVelocity = 0f
+                        val tapStartTime = System.currentTimeMillis()
+                        val initialDownPos = down.position
                         var totalDragDistance = 0f
                         var hasMoved = false
-                        var dragDeltaAccumulator = 0f
 
                         do {
                             val event = awaitPointerEvent()
-                            dragDeltaAccumulator = 0f
+                            var dragDeltaAccumulator = 0f
                             event.changes.forEach { change ->
                                 val currentDistance = kotlin.math.sqrt(
                                     (change.position.x - center.x) * (change.position.x - center.x) +
@@ -694,9 +674,6 @@ private fun TodayCircularTimeline(
                             }
                         }
 
-                        angularVelocity = 0f
-                        previousAngle = Float.NaN
-                        lastTime = 0L
                         velocitySamples.clear()
                     }
                 }
