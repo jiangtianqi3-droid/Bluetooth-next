@@ -114,7 +114,6 @@ fun EditRecordDialog(
 ) {
     var startText by remember(record.id) { mutableStateOf(formatEditTime(record.startTime)) }
     var endText by remember(record.id) { mutableStateOf(formatEditTime(record.endTime)) }
-    var noteText by remember(record.id) { mutableStateOf(record.note) }
     var errorText by remember(record.id) { mutableStateOf<String?>(null) }
 
     AlertDialog(
@@ -140,12 +139,6 @@ fun EditRecordDialog(
                     label = { Text("结束时间") },
                     singleLine = true
                 )
-                OutlinedTextField(
-                    value = noteText,
-                    onValueChange = { noteText = it },
-                    label = { Text("备注") },
-                    minLines = 2
-                )
                 Text("格式：HH:mm，仅修改当天时间", color = MaterialTheme.colorScheme.onSurfaceVariant)
                 errorText?.let {
                     Text(it, color = MaterialTheme.colorScheme.error)
@@ -160,7 +153,7 @@ fun EditRecordDialog(
                     when {
                         start == null || end == null -> errorText = "时间格式不正确"
                         end <= start -> errorText = "结束时间必须晚于开始时间"
-                        else -> onSave(start, end, noteText)
+                        else -> onSave(start, end, record.note)
                     }
                 }
             ) {

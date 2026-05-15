@@ -653,7 +653,7 @@ fun InteractiveUsageTimeline(
     val visibleSegments = remember(sortedRecords, day, awakeIntervals) {
         sortedRecords.flatMap { record ->
             record.awakeSegments(day, zone, awakeIntervals)
-        }
+        }.mergeOverlappingTimelineSegments(day, zone)
     }
     LaunchedEffect(day) {
         while (true) {
@@ -990,7 +990,7 @@ fun InteractiveUsageTimeline(
                 var handledAsLongPress = false
                 var verticalDragLocked = false
                 var horizontalDragRejected = false
-                val longPressEditMillis = 360L
+                val longPressEditMillis = 250L
                 var pinchStartedFromMinimum = false
                 var pinchAnchorContentY: Float? = null
                 val dragSlop = if (downStartedInLabelArea) 18f * dpPx else 8f * dpPx
@@ -1492,6 +1492,7 @@ private fun CompactDayStrip(
             .filter { it.startTime < dayEnd && it.endTime > dayStart }
             .sortedBy { it.startTime }
             .flatMap { it.awakeSegments(day, zone, awakeIntervals) }
+            .mergeOverlappingTimelineSegments(day, zone)
             .forEach { segment ->
                 val y1 = minuteToAwakeY(segment.startMinute, awakeIntervals, size.height) ?: return@forEach
                 val y2 = minuteToAwakeY(segment.endMinute, awakeIntervals, size.height) ?: return@forEach
@@ -1549,6 +1550,56 @@ private data class AwakeRecordSegment(
     val endMinute: Int
 ) {
     val durationMillis: Long get() = (endMinute - startMinute).coerceAtLeast(0) * 60_000L
+}
+
+private fun List<AwakeRecordSegment>.mergeOverlappingTimelineSegments(
+    day: LocalDate,
+    zone: ZoneId
+): List<AwakeRecordSegment> {
+    if (size < 2) return this
+    val sorted = sortedWith(
+        compareBy<AwakeRecordSegment> { it.startMinute }
+            .thenByDescending { it.endMinute }
+            .thenBy { it.record.id }
+    )
+    val merged = mutableListOf<AwakeRecordSegment>()
+    var current = sorted.first()
+    sorted.drop(1).forEach { next ->
+        if (next.startMinute <= current.endMinute) {
+            current = current.mergeWith(next, day, zone)
+        } else {
+            merged += current
+            current = next
+        }
+    }
+    merged += current
+    return merged
+}
+
+private fun AwakeRecordSegment.mergeWith(
+    other: AwakeRecordSegment,
+    day: LocalDate,
+    zone: ZoneId
+): AwakeRecordSegment {
+    val start = minOf(startMinute, other.startMinute)
+    val end = maxOf(endMinute, other.endMinute)
+    val representative = listOf(this, other)
+        .maxWith(
+            compareBy<AwakeRecordSegment> { it.endMinute - it.startMinute }
+                .thenByDescending { -it.startMinute }
+        )
+        .record
+    val mergedStartTime = minuteToEpochMillis(day, zone, start)
+    val mergedEndTime = minuteToEpochMillis(day, zone, end)
+    return AwakeRecordSegment(
+        record = representative.copy(
+            startTime = mergedStartTime,
+            endTime = mergedEndTime,
+            durationMillis = (mergedEndTime - mergedStartTime).coerceAtLeast(0L)
+        ),
+        startMinute = start,
+        endMinute = end
+    )
 }
 
 private data class TimelineLabelDrawItem(
@@ -2067,6 +2118,7 @@ private fun nearestUsageContentY(
     records
         .filter { it.startTime < dayEnd && it.endTime > dayStart }
         .flatMap { it.awakeSegments(day, zone, awakeIntervals) }
+        .mergeOverlappingTimelineSegments(day, zone)
         .forEach { segment ->
             val y1 = minuteToAwakeY(segment.startMinute, awakeIntervals, contentHeight) ?: return@forEach
             val y2 = minuteToAwakeY(segment.endMinute, awakeIntervals, contentHeight) ?: return@forEach
@@ -2096,6 +2148,7 @@ private fun latestUsageContentY(
     val latest = records
         .filter { it.startTime < dayEnd && it.endTime > dayStart }
         .flatMap { it.awakeSegments(day, zone, awakeIntervals) }
+        .mergeOverlappingTimelineSegments(day, zone)
         .maxByOrNull { it.endMinute }
         ?: return null
     val startY = minuteToAwakeY(latest.startMinute, awakeIntervals, contentHeight) ?: return null
@@ -2173,6 +2226,14 @@ private fun minuteOfDay(timeMillis: Long, day: LocalDate, zone: ZoneId): Int {
     if (time.toLocalDate().isBefore(day)) return 0
     if (time.toLocalDate().isAfter(day)) return 1440
     return (time.hour * 60 + time.minute).coerceIn(0, 1439)
+}
+
+private fun minuteToEpochMillis(day: LocalDate, zone: ZoneId, minute: Int): Long {
+    return day
+        .atStartOfDay(zone)
+        .plusMinutes(minute.coerceIn(0, 1440).toLong())
+        .toInstant()
+        .toEpochMilli()
 }
 
 private fun lerpFloat(start: Float, end: Float, fraction: Float): Float {
